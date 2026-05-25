@@ -479,15 +479,16 @@ class DriftingEnv:
         
         return default_friction
     
-    def add_obstacle_car(self, x, y, theta, robot_spec=None):
+    def add_obstacle_car(self, x, y, theta, robot_spec=None, velocity=0.0):
         """
-        Add a static obstacle car to the track.
+        Add an obstacle car to the track.
         
         Args:
             x: X position of obstacle car
             y: Y position of obstacle car
             theta: Heading angle of obstacle car
             robot_spec: Robot specification dict (optional)
+            velocity: Forward velocity of the obstacle car (default 0.0)
             
         Returns:
             int: Index of the added obstacle
@@ -505,6 +506,7 @@ class DriftingEnv:
             'x': x,
             'y': y,
             'theta': theta,
+            'velocity': velocity,
             'spec': robot_spec
         }
         self.obstacles.append(obstacle)
@@ -615,6 +617,30 @@ class DriftingEnv:
                 return True, i
         
         return False, None
+    
+    def update_dynamic_obstacles(self, dt):
+        """
+        Update the positions of dynamic obstacles based on their velocity.
+        
+        Args:
+            dt: Time step for integration
+        """
+        has_dynamic = False
+        for obs in self.obstacles:
+            if 'velocity' in obs and obs['velocity'] != 0.0:
+                obs['x'] += obs['velocity'] * dt
+                has_dynamic = True
+                
+        # Redraw patches if any obstacle moved
+        if has_dynamic and self.ax is not None:
+            # Remove old patches
+            for patch in self.obstacle_patches:
+                patch.remove()
+            self.obstacle_patches = []
+            
+            # Draw new patches
+            for obs in self.obstacles:
+                self._draw_obstacle_car(obs)
     
     def update_plot_frame(self, ax, position, window_size=(40, 20)):
         """
