@@ -25,3 +25,6 @@ package-dir = {"safe_control" = "."}
 
 [tool.uv]
 dev-dependencies = []
+constraint-dependencies = [
+    "ml_dtypes>=0.5.0",
+]
