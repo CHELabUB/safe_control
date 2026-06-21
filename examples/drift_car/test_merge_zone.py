@@ -6,42 +6,48 @@ Created on June 20th, 2026
 Merge zone test case for safety shielding algorithms (Gatekeeper, MPS, BackupCBF).
 
 Three-vehicle scenario on a 3-lane straight track:
-  - Ego vehicle:   upper lane (lane 0), initial x=0, travels at target_velocity
+  - Ego vehicle:   upper lane (lane 0, y=4), initial x=1, travels at target_velocity
   - Stalled car:   upper lane (lane 0), x = stalled_x_offset ahead of ego (static)
-  - Moving car:    middle lane (lane 1), x = moving_x_offset relative to ego,
-                   travels at target_velocity (same speed, ignores ego)
-  - Lower lane (lane 2): always empty, serves as backup escape route
+  - Moving car:    middle lane (lane 1, y=0), x = moving_x_offset relative to ego,
+                   travels at moving_vx (default: faster than ego, catches up)
+  - Lower lane (lane 2, y=-4): empty; not used as backup in this version
 
 Nominal plan (MPCC): S-curve reference path upper→middle (around stalled car)→upper
-Backup policy: LaneChangeController to lower lane
+Backup policy: ABORT — LaneChangeController returning to upper lane (y=4)
 
-Key insight:
-  Gatekeeper validates the full [nominal + backup] trajectory and detects early that
-  the S-curve nominal path will conflict with the moving car in the middle lane.
-  It switches to the lower-lane backup while ego is still safely in the upper lane.
+Abort backup safety constraint:
+  Safe abort requires: x_ego + v·T_b < stalled_x - r_combined
+  With T_b=1.5s, v=10m/s, stalled_x=80m: x_ego < 62.8m
+  Merge starts at merge_start = max(5, stalled_x-30) = 50m
+  → abort window extends 12.8m into the merge zone (safe partial abort)
 
-  MPS and BackupCBF have less lookahead: they may follow the nominal step-by-step
-  until ego is committed to the merge, at which point the backup path through
-  the moving car's position becomes unsafe.
-
-Tunable parameters (all relative to ego at x=0):
-  --stalled   x-offset of stalled car in upper lane (default 50m)
-  --moving    x-offset of moving car in middle lane (default 5m)
+Gets-stuck analysis:
+  After abort completes (ego back at y=4), algorithms re-evaluate every step.
+  Once moving car clears the middle lane, nominal S-curve is certifiable again.
+  Deadlock only if abort triggered at x > 62.8m (abort collides with stalled car).
 
 Usage:
-    uv run python examples/drift_car/test_merge_zone.py --algo gatekeeper --stalled 50 --moving 5
-    uv run python examples/drift_car/test_merge_zone.py --algo mps --stalled 50 --moving 5
-    uv run python examples/drift_car/test_merge_zone.py --algo backupcbf --stalled 50 --moving 5
+    uv run python examples/drift_car/test_merge_zone.py --algo gatekeeper
+    uv run python examples/drift_car/test_merge_zone.py --algo mps
+    uv run python examples/drift_car/test_merge_zone.py --algo backupcbf
+    uv run python examples/drift_car/test_merge_zone.py --figure
     uv run python examples/drift_car/test_merge_zone.py --sweep
     uv run python examples/drift_car/test_merge_zone.py --algo gatekeeper --save
 
 @required-scripts: safe_control/shielding/gatekeeper.py, safe_control/shielding/mps.py
 """
 
+import csv
+import os
+import subprocess
+from datetime import datetime
+
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import Polygon as MplPolygon
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, Dict, Any, Union
+from typing import Optional, Tuple, Dict, Any, Union, List
 import re
 from safe_control.envs.drifting_env import DriftingEnv
 from safe_control.robots.drifting_car import DriftingCar, DriftingCarSimulator
@@ -58,6 +64,29 @@ from safe_control.utils.animation import AnimationSaver
 # =============================================================================
 
 ALGO_TYPES = ['gatekeeper', 'mps', 'backupcbf']
+
+
+def _code_hash() -> str:
+    try:
+        return subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:
+        return 'unknown'
+
+
+def _build_run_id(algo_type: str, stalled_x: float, moving_x: float, moving_vx: float) -> str:
+    """Stable, human-readable identifier for one (algo, scenario) combination."""
+    # Encode sign explicitly so +10 and -10 don't collide after slugification
+    mx_sign = 'n' if moving_x < 0 else 'p'
+    vx_sign = 'n' if moving_vx < 0 else 'p'
+    return (
+        f"mergezone_{algo_type}"
+        f"_stalled{stalled_x:.0f}"
+        f"_moving{mx_sign}{abs(moving_x):.0f}"
+        f"_vx{vx_sign}{abs(moving_vx):.0f}"
+    )
 
 
 # =============================================================================
@@ -133,7 +162,7 @@ class SimulationConfig:
     dt: float = 0.05
     tf: float = 15.0
     nominal_horizon_time: float = 6.0
-    backup_horizon_time: float = 3.0
+    backup_horizon_time: float = 1.5
     event_offset: float = 0.05
     safety_margin: float = 0.01
     initial_velocity: float = 10.0
@@ -147,12 +176,126 @@ class TestConfig:
     track: TrackConfig
     vehicle: VehicleConfig
     simulation: SimulationConfig
-    stalled_x_offset: float = 50.0   # x of stalled car in upper lane (relative to ego)
-    moving_x_offset: float = 80.0    # x of moving car in middle lane (relative to ego)
-    moving_vx: float = -10.0         # vx of moving car (negative = oncoming, positive = same dir)
+    stalled_x_offset: float = 80.0   # x of stalled car in upper lane (relative to ego)
+    moving_x_offset: float = -10.0   # x of moving car in middle lane (relative to ego)
+    moving_vx: float = 12.0          # vx of moving car (negative = oncoming, positive = same dir)
     algo_type: str = 'gatekeeper'
     save_animation: bool = False
     expected_collision: bool = False
+
+
+# =============================================================================
+# Run Registry
+# =============================================================================
+
+@dataclass
+class RunRecord:
+    run_id: str
+    timestamp: str
+    algo: str
+    stalled_x: float
+    moving_x: float
+    moving_vx: float
+    backup_horizon: float
+    nominal_horizon: float
+    collision: str        # 'YES' / 'NO'
+    total_steps: int
+    nominal_pct: float
+    global_min_h: float
+    animation_path: str   # relative path to .mp4, or ''
+    data_path: str        # relative path to .npz, or ''
+    code_hash: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'run_id':          self.run_id,
+            'timestamp':       self.timestamp,
+            'algo':            self.algo,
+            'stalled_x':       f"{self.stalled_x:.1f}",
+            'moving_x':        f"{self.moving_x:.1f}",
+            'moving_vx':       f"{self.moving_vx:.1f}",
+            'backup_horizon':  f"{self.backup_horizon:.2f}",
+            'nominal_horizon': f"{self.nominal_horizon:.2f}",
+            'collision':       self.collision,
+            'total_steps':     str(self.total_steps),
+            'nominal_pct':     f"{self.nominal_pct:.1f}",
+            'global_min_h':    f"{self.global_min_h:.4f}",
+            'animation_path':  self.animation_path,
+            'data_path':       self.data_path,
+            'code_hash':       self.code_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'RunRecord':
+        return cls(
+            run_id=d['run_id'],
+            timestamp=d['timestamp'],
+            algo=d['algo'],
+            stalled_x=float(d['stalled_x']),
+            moving_x=float(d['moving_x']),
+            moving_vx=float(d['moving_vx']),
+            backup_horizon=float(d['backup_horizon']),
+            nominal_horizon=float(d['nominal_horizon']),
+            collision=d['collision'],
+            total_steps=int(d['total_steps']),
+            nominal_pct=float(d['nominal_pct']),
+            global_min_h=float(d['global_min_h']),
+            animation_path=d.get('animation_path', ''),
+            data_path=d.get('data_path', ''),
+            code_hash=d.get('code_hash', ''),
+        )
+
+
+class RunRegistry:
+    CSV_PATH = "output/run_registry.csv"
+    FIELDS = [
+        'run_id', 'timestamp', 'algo', 'stalled_x', 'moving_x', 'moving_vx',
+        'backup_horizon', 'nominal_horizon', 'collision', 'total_steps',
+        'nominal_pct', 'global_min_h', 'animation_path', 'data_path', 'code_hash',
+    ]
+
+    def load(self) -> List[RunRecord]:
+        if not os.path.exists(self.CSV_PATH):
+            return []
+        with open(self.CSV_PATH, newline='') as f:
+            return [RunRecord.from_dict(row) for row in csv.DictReader(f)]
+
+    def upsert(self, record: RunRecord) -> None:
+        os.makedirs(os.path.dirname(self.CSV_PATH), exist_ok=True)
+        rows: Dict[str, RunRecord] = {r.run_id: r for r in self.load()}
+        rows[record.run_id] = record
+        with open(self.CSV_PATH, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.FIELDS)
+            writer.writeheader()
+            for r in rows.values():
+                writer.writerow(r.to_dict())
+
+    def find_stale(self) -> List[RunRecord]:
+        current_hash = _code_hash()
+        stale = []
+        for r in self.load():
+            missing_animation = r.animation_path and not os.path.exists(r.animation_path)
+            outdated_code = r.code_hash not in ('unknown', current_hash)
+            if missing_animation or outdated_code:
+                stale.append(r)
+        return stale
+
+    def print_table(self) -> None:
+        rows = self.load()
+        if not rows:
+            print("  (registry is empty — run a simulation first)")
+            return
+        cols = ['run_id', 'timestamp', 'collision', 'total_steps',
+                'nominal_pct', 'global_min_h', 'animation_path', 'code_hash']
+        dicts = [r.to_dict() for r in rows]
+        widths = {c: max(len(c), max(len(str(d.get(c, ''))) for d in dicts)) for c in cols}
+        sep = '  '
+        header = sep.join(f"{c:{widths[c]}}" for c in cols)
+        divider = sep.join('-' * widths[c] for c in cols)
+        print(header)
+        print(divider)
+        for d in dicts:
+            print(sep.join(f"{str(d.get(c, '')):{widths[c]}}" for c in cols))
 
 
 # =============================================================================
@@ -284,9 +427,9 @@ def setup_controllers(
     )
     mpcc.set_progress_rate(sim.target_velocity)
 
-    # Backup: lane change to lower lane (backup_lane_y < ego_lane_y → 'right' w.r.t. driving dir)
-    backup_controller = LaneChangeController(car.robot_spec, sim.dt, direction='right')
-    print(f"  Backup: lane change to lower lane (y={backup_lane_y:.2f})")
+    # Backup: abort — steer back to original upper lane (y=ego_lane_y)
+    backup_controller = LaneChangeController(car.robot_spec, sim.dt, direction='left')
+    print(f"  Backup: abort to upper lane (y={ego_lane_y:.2f})")
 
     if config.algo_type == 'mps':
         shielding = MPS(
@@ -321,7 +464,7 @@ def setup_controllers(
         )
         print("  Algorithm: Gatekeeper (backward search)")
 
-    shielding.set_backup_controller(backup_controller, target=backup_lane_y)
+    shielding.set_backup_controller(backup_controller, target=ego_lane_y)
     shielding.set_environment(env)
     if env.dynamic_obstacles:
         shielding.set_moving_obstacles(lambda t=0.0: env.get_dynamic_obstacle_states(t))
@@ -374,12 +517,9 @@ def setup_visualization(
 ) -> Tuple:
     # Nominal S-curve reference path
     ax.plot(ref_x, ref_y, 'g-', linewidth=1.5, alpha=0.4, label='Nominal path (MPCC)')
-    # Backup target lane
-    ax.axhline(y=backup_lane_y, color='orange', linewidth=1, alpha=0.3,
-               linestyle=':', label='Backup lane (lower)')
-    # Ego start lane
-    ax.axhline(y=ego_lane_y, color='cyan', linewidth=1, alpha=0.2,
-               linestyle=':', label='Upper lane')
+    # Abort target = upper lane (same as ego start lane)
+    ax.axhline(y=ego_lane_y, color='cyan', linewidth=1.5, alpha=0.5,
+               linestyle=':', label='Upper lane / abort target')
 
     ref_horizon_line, = ax.plot([], [], 'y-', linewidth=3, alpha=0.9, label='MPCC horizon')
     mpc_pred_line, = ax.plot([], [], 'r--', linewidth=2, alpha=0.8, label='MPCC prediction')
@@ -504,11 +644,50 @@ def run_simulation(
 
 def collect_trajectory_data(
     algo_type: str,
-    stalled_x_offset: float = 50.0,
-    moving_x_offset: float = 80.0,
-    moving_vx: float = -10.0,
+    stalled_x_offset: float = 80.0,
+    moving_x_offset: float = -10.0,
+    moving_vx: float = 12.0,
 ) -> Dict[str, Any]:
-    """Run simulation headlessly and return full per-step trajectory data."""
+    """
+    Run simulation headlessly and return full per-step trajectory data.
+
+    Results are cached in output/data/{run_id}.npz keyed by git hash.
+    On a second call with the same parameters and unchanged code the cache is
+    loaded directly — no re-simulation needed.
+    """
+    run_id = _build_run_id(algo_type, stalled_x_offset, moving_x_offset, moving_vx)
+    data_path = f"output/data/{run_id}.npz"
+    current_hash = _code_hash()
+
+    # --- Cache hit? ---
+    if os.path.exists(data_path):
+        try:
+            npz = np.load(data_path, allow_pickle=True)
+            if str(npz['code_hash']) == current_hash:
+                print(f"  Loading cached trajectory: {algo_type} ({data_path})")
+                return {
+                    'algo':         str(npz['algo']),
+                    'x':            npz['x'],
+                    'y':            npz['y'],
+                    'theta':        npz['theta'] if 'theta' in npz else np.zeros(len(npz['x'])),
+                    'mode':         list(npz['mode']),
+                    'h_min':        npz['h_min'],
+                    't':            npz['t'],
+                    'collision':    bool(npz['collision']),
+                    'ego_lane_y':   float(npz['ego_lane_y']),
+                    'backup_lane_y': float(npz['backup_lane_y']),
+                    'middle_lane_y': float(npz['middle_lane_y']),
+                    'stalled_x':    float(npz['stalled_x']),
+                    'moving_x':     float(npz['moving_x']),
+                    'moving_vx':    float(npz['moving_vx']),
+                    'track_length': float(npz['track_length']),
+                    'run_id':       run_id,
+                    'data_path':    data_path,
+                }
+        except Exception:
+            pass  # corrupted cache — fall through to re-simulate
+
+    # --- Simulate ---
     config = create_merge_zone_test(
         algo_type=algo_type,
         stalled_x_offset=stalled_x_offset,
@@ -536,8 +715,9 @@ def collect_trajectory_data(
 
     sim = config.simulation
     num_steps = int(sim.tf / sim.dt)
+    middle_lane_y = env.get_lane_center(track.middle_lane_idx)
 
-    xs, ys, modes, h_mins, times = [], [], [], [], []
+    xs, ys, thetas, modes, h_mins, times = [], [], [], [], [], []
     collision = False
 
     print(f"  Collecting trajectory: {algo_type} ...", end='', flush=True)
@@ -558,6 +738,7 @@ def collect_trajectory_data(
         status = shielding.get_status()
         xs.append(pos[0])
         ys.append(pos[1])
+        thetas.append(float(state[2]))   # heading angle
         modes.append('backup' if status['using_backup'] else 'nominal')
         h_mins.append(status.get('h_min', 1.0))
         times.append(step * sim.dt)
@@ -570,53 +751,140 @@ def collect_trajectory_data(
             break
 
     print(f" {'COLLISION' if collision else 'OK'} ({len(xs)} steps)")
+
+    # --- Save cache ---
+    os.makedirs(os.path.dirname(data_path), exist_ok=True)
+    np.savez(
+        data_path,
+        algo=algo_type,
+        x=np.array(xs),
+        y=np.array(ys),
+        theta=np.array(thetas),
+        mode=np.array(modes),
+        h_min=np.array(h_mins),
+        t=np.array(times),
+        collision=collision,
+        ego_lane_y=ego_lane_y,
+        backup_lane_y=backup_lane_y,
+        middle_lane_y=middle_lane_y,
+        stalled_x=stalled_x_offset,
+        moving_x=moving_x_offset,
+        moving_vx=moving_vx,
+        track_length=float(track.track_length),
+        code_hash=current_hash,
+    )
+
     return {
-        'algo': algo_type,
-        'x': np.array(xs),
-        'y': np.array(ys),
-        'mode': modes,
-        'h_min': np.array(h_mins),
-        't': np.array(times),
-        'collision': collision,
-        'ego_lane_y': ego_lane_y,
+        'algo':         algo_type,
+        'x':            np.array(xs),
+        'y':            np.array(ys),
+        'theta':        np.array(thetas),
+        'mode':         modes,
+        'h_min':        np.array(h_mins),
+        't':            np.array(times),
+        'collision':    collision,
+        'ego_lane_y':   ego_lane_y,
         'backup_lane_y': backup_lane_y,
-        'middle_lane_y': env.get_lane_center(track.middle_lane_idx),
-        'stalled_x': stalled_x_offset,
-        'moving_x': moving_x_offset,
-        'moving_vx': moving_vx,
+        'middle_lane_y': middle_lane_y,
+        'stalled_x':    stalled_x_offset,
+        'moving_x':     moving_x_offset,
+        'moving_vx':    moving_vx,
         'track_length': track.track_length,
+        'run_id':       run_id,
+        'data_path':    data_path,
     }
 
 
+def _draw_car_at(ax, cx, cy, theta, body_color,
+                 tire_color=(0.25, 0.25, 0.25), alpha=0.90, zorder=8,
+                 a=1.4, b=1.4, body_length=4.5, body_width=2.0):
+    """
+    Draw a realistic car silhouette (body polygon + 4 tire rectangles) at (cx, cy).
+
+    Uses the same 10-point polygon geometry as DriftingEnv._create_obstacle_car_patches().
+    """
+    L, W = body_length, body_width
+    rear_overhang  = (L - a - b) * 0.4
+    front_overhang = (L - a - b) * 0.6
+
+    # 10-point tapered car body (local frame, x forward)
+    body_verts = np.array([
+        [-b - rear_overhang,        -W / 2       ],
+        [-b - rear_overhang,         W / 2       ],
+        [-b - rear_overhang + 0.3,   W / 2 + 0.05],
+        [ a + front_overhang - 0.8,  W / 2 + 0.05],
+        [ a + front_overhang - 0.3,  W / 2 * 0.7 ],
+        [ a + front_overhang,        W / 2 * 0.5 ],
+        [ a + front_overhang,       -W / 2 * 0.5 ],
+        [ a + front_overhang - 0.3, -W / 2 * 0.7 ],
+        [ a + front_overhang - 0.8, -W / 2 - 0.05],
+        [-b - rear_overhang + 0.3,  -W / 2 - 0.05],
+    ]).T   # shape (2, 10)
+
+    # Tire rectangles (local frame)
+    tl, tw    = 0.6 / 2, 0.25 / 2
+    ty_off    = W / 2 - tw * 2 - 0.1
+    tire_ctrs = {
+        'fl': np.array([ a,  ty_off]),
+        'fr': np.array([ a, -ty_off]),
+        'rl': np.array([-b,  ty_off]),
+        'rr': np.array([-b, -ty_off]),
+    }
+    tire_verts = np.array([[-tl, -tw], [-tl, tw], [tl, tw], [tl, -tw]]).T  # (2, 4)
+
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    R = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+    center = np.array([[cx], [cy]])
+
+    # Body
+    body_world = R @ body_verts + center
+    ax.add_patch(MplPolygon(
+        body_world.T, closed=True,
+        facecolor=body_color, edgecolor='black',
+        linewidth=0.8, alpha=alpha, zorder=zorder,
+    ))
+
+    # Tires
+    for pos in tire_ctrs.values():
+        pos_world = R @ pos.reshape(2, 1) + center
+        tire_world = R @ tire_verts + pos_world
+        ax.add_patch(MplPolygon(
+            tire_world.T, closed=True,
+            facecolor=tire_color, edgecolor='black',
+            linewidth=0.5, alpha=alpha, zorder=zorder + 1,
+        ))
+
+
 def generate_trajectory_figure(
-    stalled_x_offset: float = 50.0,
-    moving_x_offset: float = 80.0,
-    moving_vx: float = -10.0,
-    output_path: str = 'output/merge_zone_comparison.png',
+    stalled_x_offset: float = 80.0,
+    moving_x_offset: float = -10.0,
+    moving_vx: float = 12.0,
+    output_path: str = 'output/merge_zone_abort_comparison.png',
 ) -> None:
     """
-    Generate a trajectory overlay figure for all three algorithms on the same scenario,
-    styled similarly to shielding/sample_fig.png.
+    Trajectory overlay figure whose panel (a) uses DriftingEnv.setup_plot() and
+    DriftingEnv._create_obstacle_car_patches() — the exact same rendering as the video.
 
-    Panel (a): Top-down view — ego trajectories (3 colours) + lane lines + obstacles
-    Panel (b): h_min safety value over time per algorithm
-    Panel (c): Active mode (nominal / backup) over time per algorithm
+    Panel (a): Road/grass/lanes from DriftingEnv; car-body snapshots every 1 s.
+    Panel (b): h_backup safety margin over time per algorithm.
+    Panel (c): Backup activation intervals as filled bands per algorithm.
     """
-    import os
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
 
     algos = ['backupcbf', 'mps', 'gatekeeper']
     colors = {
-        'backupcbf': '#1f77b4',   # blue  — matches sample_fig Backup CBF colour
-        'mps':       '#9467bd',   # purple
-        'gatekeeper': '#2ca02c',  # green
+        'backupcbf':  np.array([0.12, 0.47, 0.71]),
+        'mps':        np.array([0.58, 0.40, 0.74]),
+        'gatekeeper': np.array([0.17, 0.63, 0.17]),
     }
     labels = {
-        'backupcbf': 'Ego Car: Backup CBF',
-        'mps':       'Ego Car: MPS',
+        'backupcbf':  'Ego Car: Backup CBF',
+        'mps':        'Ego Car: MPS',
         'gatekeeper': 'Ego Car: Gatekeeper',
     }
     linestyles = {'backupcbf': '-', 'mps': '--', 'gatekeeper': '-.'}
+    CAR_BODY_INTERVAL = 20   # one snapshot per 1 s (dt=0.05, 20 steps)
+    obstacle_spec = {'body_length': 4.5, 'body_width': 2.0, 'a': 1.4, 'b': 1.4, 'radius': 1.0}
 
     print(f"\nGenerating trajectory comparison figure ...")
     print(f"  Scenario: stalled_x={stalled_x_offset:.0f}m, "
@@ -626,134 +894,174 @@ def generate_trajectory_figure(
     for algo in algos:
         data[algo] = collect_trajectory_data(algo, stalled_x_offset, moving_x_offset, moving_vx)
 
-    ref_data = data[algos[0]]
-    ego_lane_y = ref_data['ego_lane_y']
+    ref_data      = data[algos[0]]
+    ego_lane_y    = ref_data['ego_lane_y']
     backup_lane_y = ref_data['backup_lane_y']
     middle_lane_y = ref_data['middle_lane_y']
-    stalled_x = ref_data['stalled_x']
+    stalled_x     = ref_data['stalled_x']
     moving_x_init = ref_data['moving_x']
-    track_length = ref_data['track_length']
+    track_length  = ref_data['track_length']
+    half_lw       = 2.0
 
-    # Build the reference S-curve path for context
     tc = TrackConfig()
     ref_px, ref_py = build_nominal_path(tc, stalled_x, ego_lane_y, middle_lane_y, track_length)
 
+    # -------------------------------------------------------------------------
+    # Figure layout
+    # -------------------------------------------------------------------------
     plt.ioff()
-    fig = plt.figure(figsize=(14, 8))
-    gs = fig.add_gridspec(2, 2, height_ratios=[2, 1], hspace=0.35, wspace=0.3)
-    ax_traj = fig.add_subplot(gs[0, :])   # full-width top: trajectory
-    ax_h    = fig.add_subplot(gs[1, 0])   # bottom-left: h_min
-    ax_mode = fig.add_subplot(gs[1, 1])   # bottom-right: mode timeline
+    fig = plt.figure(figsize=(18, 9))
+    gs = fig.add_gridspec(
+        3, 1, height_ratios=[3, 1, 1],
+        hspace=0.50, top=0.91, bottom=0.07, left=0.06, right=0.97,
+    )
+    ax_traj = fig.add_subplot(gs[0])
+    ax_h    = fig.add_subplot(gs[1])
+    ax_mode = fig.add_subplot(gs[2])
 
-    # --- Panel (a): Trajectories ---
-    ax_traj.set_facecolor('#f5f5f5')
+    # -------------------------------------------------------------------------
+    # Panel (a): use DriftingEnv's actual rendering — road, grass, lane dividers
+    # -------------------------------------------------------------------------
+    road_env = DriftingEnv(
+        track_type='straight',
+        track_width=tc.lane_width * tc.num_lanes,
+        track_length=track_length,
+        num_lanes=tc.num_lanes,
+    )
+    road_env.setup_plot(ax=ax_traj, fig=fig)   # draws grass + road surface + lane markings
 
-    # Lane boundaries and centrelines
-    lane_ys = [ego_lane_y, middle_lane_y, backup_lane_y]
-    lane_names = ['Upper lane', 'Middle lane', 'Lower lane (backup)']
-    lane_colors = ['#cccccc', '#bbbbbb', '#aaaaaa']
-    lw = ref_data['track_length']
-    half_lw = 2.0  # half of lane_width=4
+    # Override equal-aspect lock set by setup_plot, and set the desired view
+    ax_traj.set_aspect('auto')
+    ax_traj.grid(False)
+    x_lo = min(moving_x_init - 8, -8)
+    x_hi = min(max(data[a]['x'].max() for a in algos) + 15, track_length)
+    ax_traj.set_xlim(x_lo, x_hi)
+    ax_traj.set_ylim(backup_lane_y - 1.2, ego_lane_y + 2.0)
 
-    for i, ly in enumerate(lane_ys):
-        ax_traj.axhspan(ly - half_lw, ly + half_lw,
-                        alpha=0.12 + 0.04 * i, color=lane_colors[i])
-        ax_traj.axhline(ly, color='white', linewidth=1.0, alpha=0.6, linestyle='--')
+    # Faint nominal S-curve reference
+    ax_traj.plot(ref_px, ref_py, color='yellow', linewidth=1.0,
+                 linestyle=':', alpha=0.35, zorder=3)
 
-    # Dashed lane dividers
-    for boundary_y in [ego_lane_y - half_lw, middle_lane_y - half_lw, backup_lane_y - half_lw,
-                        backup_lane_y + half_lw]:
-        ax_traj.axhline(boundary_y, color='gray', linewidth=1.5, alpha=0.8, linestyle='-')
+    # Stalled car — same call as DriftingEnv uses internally for static obstacles
+    for p in road_env._create_obstacle_car_patches(
+            {'x': stalled_x, 'y': ego_lane_y, 'theta': 0.0, 'spec': obstacle_spec},
+            body_color=(0.72, 0.15, 0.15), zorder=12):
+        ax_traj.add_patch(p)
+    ax_traj.text(stalled_x, ego_lane_y + half_lw + 0.25, 'Obstacle',
+                 ha='center', va='bottom', fontsize=8,
+                 color='#e84040', fontweight='bold', zorder=13)
 
-    # Reference S-curve path
-    ax_traj.plot(ref_px, ref_py, color='green', linewidth=1.2, alpha=0.3,
-                 linestyle=':', label='Nominal path (S-curve)')
+    # Moving car at t=0 — same call used for dynamic obstacles
+    for p in road_env._create_obstacle_car_patches(
+            {'x': moving_x_init, 'y': middle_lane_y, 'theta': 0.0, 'spec': obstacle_spec},
+            body_color=(0.85, 0.50, 0.10), zorder=11):
+        ax_traj.add_patch(p)
+    ax_traj.annotate(
+        '', xy=(moving_x_init + np.sign(moving_vx) * 6, middle_lane_y),
+        xytext=(moving_x_init, middle_lane_y),
+        arrowprops=dict(arrowstyle='->', color='#ff7f0e', lw=2.0), zorder=14,
+    )
 
-    # Stalled car marker
-    ax_traj.add_patch(plt.Rectangle(
-        (stalled_x - 2.25, ego_lane_y - 1.0), 4.5, 2.0,
-        color='#d62728', alpha=0.85, zorder=5
-    ))
-    ax_traj.text(stalled_x, ego_lane_y + 1.5, 'Stalled', ha='center', fontsize=8,
-                 color='#d62728', fontweight='bold')
-
-    # Moving car initial position marker
-    ax_traj.add_patch(plt.Rectangle(
-        (moving_x_init - 2.25, middle_lane_y - 1.0), 4.5, 2.0,
-        color='#ff7f0e', alpha=0.70, zorder=5
-    ))
-    ax_traj.text(moving_x_init, middle_lane_y + 1.5, 'Moving\n(t=0)', ha='center', fontsize=7,
-                 color='#ff7f0e', fontweight='bold')
-    arrow_dx = np.sign(moving_vx) * 8
-    ax_traj.annotate('', xy=(moving_x_init + arrow_dx, middle_lane_y),
-                     xytext=(moving_x_init, middle_lane_y),
-                     arrowprops=dict(arrowstyle='->', color='#ff7f0e', lw=1.5))
-
-    # Ego trajectories
+    # Ego car snapshots — same geometry via _create_obstacle_car_patches
+    legend_patches = []
     for algo in algos:
         d = data[algo]
-        x, y = d['x'], d['y']
-        ax_traj.plot(x, y, color=colors[algo], linewidth=2.2,
-                     linestyle=linestyles[algo], label=labels[algo], zorder=10)
+        x, y, theta_arr = d['x'], d['y'], d['theta']
 
-        # Mark backup segments with thicker line
-        backup_mask = np.array([m == 'backup' for m in d['mode']])
-        if backup_mask.any():
-            # Segment contiguous backup regions
-            starts = np.where(np.diff(backup_mask.astype(int)) == 1)[0] + 1
-            ends   = np.where(np.diff(backup_mask.astype(int)) == -1)[0] + 1
-            if backup_mask[0]:
-                starts = np.concatenate([[0], starts])
-            if backup_mask[-1]:
-                ends = np.concatenate([ends, [len(backup_mask)]])
-            for s, e in zip(starts, ends):
-                ax_traj.plot(x[s:e], y[s:e], color=colors[algo],
-                             linewidth=4.0, alpha=0.5, zorder=9)
+        # Trajectory trace (same as DriftingCar.trajectory_line)
+        ax_traj.plot(x, y, color=colors[algo], linewidth=1.5,
+                     linestyle=linestyles[algo], alpha=0.55, zorder=4)
 
+        for i in range(0, len(x), CAR_BODY_INTERVAL):
+            is_backup = (d['mode'][i] == 'backup')
+            for p in road_env._create_obstacle_car_patches(
+                    {'x': x[i], 'y': y[i], 'theta': float(theta_arr[i]), 'spec': obstacle_spec},
+                    body_color=tuple(colors[algo]), zorder=10):
+                p.set_alpha(0.90 if not is_backup else 0.50)
+                ax_traj.add_patch(p)
+
+        legend_patches.append(mpatches.Patch(
+            facecolor=colors[algo], edgecolor='black', linewidth=0.8, label=labels[algo],
+        ))
+
+    legend_patches += [
+        mpatches.Patch(facecolor=(0.72, 0.15, 0.15), edgecolor='black',
+                       linewidth=0.8, label='Obstacle'),
+        mpatches.Patch(facecolor=(0.85, 0.50, 0.10), edgecolor='black',
+                       linewidth=0.8, label='Moving car (t=0)'),
+    ]
     ax_traj.set_xlabel('X [m]', fontsize=11)
     ax_traj.set_ylabel('Y [m]', fontsize=11)
     ax_traj.set_title(
-        f'(a) Merge Zone Trajectories — stalled x={stalled_x:.0f}m, '
-        f'moving car x₀={moving_x_init:+.0f}m, vx={moving_vx:+.1f} m/s',
+        f'(a) Merge Zone Trajectories — stalled x={stalled_x:.0f} m, '
+        f'moving car x₀={moving_x_init:+.0f} m, vx={moving_vx:+.1f} m/s',
         fontsize=11, fontweight='bold',
     )
-    ax_traj.legend(loc='lower right', fontsize=9, framealpha=0.85)
-    x_max = max(max(data[a]['x'].max() for a in algos), stalled_x + 40, moving_x_init + 20)
-    ax_traj.set_xlim(-5, min(x_max + 10, track_length))
-    ax_traj.set_ylim(backup_lane_y - 3, ego_lane_y + 3)
+    ax_traj.legend(handles=legend_patches, loc='upper left',
+                   fontsize=8, framealpha=0.75, ncol=3)
 
-    # --- Panel (b): h_min over time ---
+    # -------------------------------------------------------------------------
+    # Panel (b): h_backup over time
+    # -------------------------------------------------------------------------
+    t_max = max(data[a]['t'].max() for a in algos)
+    h_all = np.concatenate([data[a]['h_min'] for a in algos])
+    h_lo  = min(h_all.min() - 0.3, -0.5)
+    h_hi  = max(h_all.max() + 0.2,  2.0)
+
+    ax_h.fill_between([0, t_max], h_lo, 0, color='#d62728', alpha=0.18, zorder=1)
+    ax_h.axhline(0, color='#d62728', linewidth=1.0, linestyle='--', alpha=0.7, zorder=2)
+    ax_h.text(t_max * 0.98, h_lo * 0.55, 'Unsafe Region',
+              ha='right', va='center', fontsize=8, color='#d62728', alpha=0.8)
     for algo in algos:
         d = data[algo]
         ax_h.plot(d['t'], d['h_min'], color=colors[algo], linewidth=1.8,
-                  linestyle=linestyles[algo], label=algo)
-    ax_h.axhline(0, color='red', linewidth=1.0, alpha=0.6, linestyle='--')
-    t_max = max(data[a]['t'].max() for a in algos)
-    ax_h.fill_between([0, t_max], 0, -0.5, color='red', alpha=0.12, label='Unsafe region')
+                  linestyle=linestyles[algo], label=algo, zorder=3)
+    ax_h.set_xlim(0, t_max)
+    ax_h.set_ylim(h_lo, h_hi)
     ax_h.set_xlabel('Time [s]', fontsize=10)
-    ax_h.set_ylabel(r'$h_{\min}$', fontsize=10)
-    ax_h.set_title('(b) Safety Margin $h_{\\min}$', fontsize=10, fontweight='bold')
-    ax_h.legend(fontsize=8)
+    ax_h.set_ylabel(r'$h_{\mathrm{backup}}$', fontsize=10)
+    ax_h.set_title('(b) Backup CBF Value $h_{\\mathrm{backup}}$', fontsize=10, fontweight='bold')
+    ax_h.legend(fontsize=8, loc='upper right')
+    ax_h.grid(True, alpha=0.25, linestyle=':')
 
-    # --- Panel (c): Mode (nominal / backup) over time ---
-    mode_vals = {'nominal': 1, 'backup': 0}
+    # -------------------------------------------------------------------------
+    # Panel (c): Backup activation intervals
+    # -------------------------------------------------------------------------
+    row_height, row_gap = 0.7, 0.15
+    yticks, ytick_labels = [], []
     for i, algo in enumerate(algos):
         d = data[algo]
-        mv = np.array([mode_vals[m] for m in d['mode']], dtype=float)
-        offset = i * 0.04   # slight vertical offset to distinguish overlapping lines
-        ax_mode.plot(d['t'], mv + offset, color=colors[algo], linewidth=2.0,
-                     linestyle=linestyles[algo], label=algo, drawstyle='steps-post')
-    ax_mode.set_yticks([0, 1])
-    ax_mode.set_yticklabels(['Backup', 'Nominal'])
+        row_y   = i * (row_height + row_gap)
+        t_arr   = d['t']
+        bk_mask = np.array([m == 'backup' for m in d['mode']])
+        ax_mode.fill_between([t_arr[0], t_arr[-1]], row_y, row_y + row_height,
+                             color=colors[algo], alpha=0.15)
+        starts = np.where(np.diff(bk_mask.astype(int)) == 1)[0] + 1
+        ends   = np.where(np.diff(bk_mask.astype(int)) == -1)[0] + 1
+        if bk_mask[0]:
+            starts = np.concatenate([[0], starts])
+        if bk_mask[-1]:
+            ends = np.concatenate([ends, [len(bk_mask)]])
+        for s, e in zip(starts, ends):
+            ax_mode.fill_between(
+                [t_arr[s], t_arr[min(e, len(t_arr) - 1)]],
+                row_y, row_y + row_height, color=colors[algo], alpha=0.85,
+            )
+        yticks.append(row_y + row_height / 2)
+        ytick_labels.append(algo)
+    ax_mode.set_xlim(0, t_max)
+    ax_mode.set_ylim(-0.1, len(algos) * (row_height + row_gap))
+    ax_mode.set_yticks(yticks)
+    ax_mode.set_yticklabels(ytick_labels, fontsize=9)
     ax_mode.set_xlabel('Time [s]', fontsize=10)
-    ax_mode.set_ylabel('Mode', fontsize=10)
-    ax_mode.set_title('(c) Controller Mode Over Time', fontsize=10, fontweight='bold')
-    ax_mode.legend(fontsize=8)
-    ax_mode.set_ylim(-0.2, 1.3)
+    ax_mode.set_title('(c) Backup Activation Intervals  (solid = backup, faint = nominal)',
+                      fontsize=10, fontweight='bold')
+    ax_mode.grid(axis='x', alpha=0.25, linestyle=':')
 
-    plt.suptitle('Merge Zone Safety Comparison: Gatekeeper vs MPS vs BackupCBF',
-                 fontsize=12, fontweight='bold', y=0.98)
-
+    plt.suptitle(
+        'Merge Zone Safety Comparison: Gatekeeper vs MPS vs Backup CBF',
+        fontsize=13, fontweight='bold', y=0.97,
+    )
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"\nFigure saved → {output_path}")
     plt.close(fig)
@@ -790,11 +1098,17 @@ def run_test(config: TestConfig) -> Dict[str, Any]:
 
     simulator = DriftingCarSimulator(car, env, show_animation=True)
 
+    run_id = _build_run_id(
+        config.algo_type, config.stalled_x_offset,
+        config.moving_x_offset, config.moving_vx,
+    )
+
     animation_saver = None
+    animation_path = ''
     if config.save_animation:
-        safe_name = slugify_name(config.name)
-        output_dir = f"output/animations/{safe_name}"
+        output_dir = f"output/animations/{run_id}"
         animation_saver = AnimationSaver(output_dir=output_dir, save_per_frame=1, fps=30)
+        animation_path = f"{output_dir}/{run_id}.mp4"
         print(f"\n  Animation saving enabled → {output_dir}/")
 
     print(f"\nConfiguration:")
@@ -811,7 +1125,29 @@ def run_test(config: TestConfig) -> Dict[str, Any]:
     )
 
     if animation_saver is not None:
-        animation_saver.export_video(output_name=f"{slugify_name(config.name)}.mp4")
+        animation_saver.export_video(output_name=f"{run_id}.mp4")
+
+    # --- Persist run record ---
+    sim = config.simulation
+    registry = RunRegistry()
+    record = RunRecord(
+        run_id=run_id,
+        timestamp=datetime.now().isoformat(timespec='seconds'),
+        algo=config.algo_type,
+        stalled_x=config.stalled_x_offset,
+        moving_x=config.moving_x_offset,
+        moving_vx=config.moving_vx,
+        backup_horizon=sim.backup_horizon_time,
+        nominal_horizon=sim.nominal_horizon_time,
+        collision='YES' if results['collision'] else 'NO',
+        total_steps=results['total_steps'],
+        nominal_pct=100.0 * results['nominal_ratio'],
+        global_min_h=results['global_min_h'],
+        animation_path=animation_path,
+        data_path='',
+        code_hash=_code_hash(),
+    )
+    registry.upsert(record)
 
     print("\n" + "-" * 50)
     print("Results:")
@@ -845,28 +1181,40 @@ def run_test(config: TestConfig) -> Dict[str, Any]:
 
 def create_merge_zone_test(
     algo_type: str = 'gatekeeper',
-    stalled_x_offset: float = 50.0,
-    moving_x_offset: float = 80.0,
-    moving_vx: float = -10.0,
+    stalled_x_offset: float = 80.0,
+    moving_x_offset: float = -10.0,
+    moving_vx: float = 12.0,
     save_animation: bool = False,
     expected_collision: bool = False,
 ) -> TestConfig:
     """
     Create a merge zone test configuration.
 
-    Default scenario: oncoming car in middle lane (moving_vx < 0).
-      - Oncoming car starts 80m ahead, travels toward ego at -10 m/s.
-      - They meet at t≈4s at x≈41m (right in the S-curve merge zone).
-      - Backup (lower lane) initiated at t=0 avoids the car (gap ≈49m when crossing y=0).
-      - If backup initiated at t≈4s, the oncoming car is right there → collision.
-      → Gatekeeper (full horizon check) commits to backup early and succeeds.
-      → MPS (step-by-step) follows nominal until car is adjacent → fails.
+    Default scenario: catching-up car in middle lane (abort-to-upper-lane backup).
+      - Stalled car at x=80m in upper lane (ego's home lane).
+      - Moving car starts 10m behind ego in middle lane, travels at 12 m/s (ego at 10 m/s).
+        Car catches up to ego at t≈5.5s when ego is executing the S-curve merge (x≈56m).
+      - Backup policy: abort the lane change, return to upper lane (y=+4).
+        Safe abort window: ego must be at x < 62.8m when abort triggers (T_b=1.5s, S=80).
+        This gives 12.8m of merge overlap — the abort remains safe while partially merged.
+
+    Backup geometry constraint:
+      safe_abort if:  x_ego + v * T_b < stalled_x - r_combined
+                      x_ego + 15 < 77.8  →  x_ego < 62.8 m
+      merge_start = max(5, stalled_x-30) = 50 m
+      → abort is safe for up to 12.8 m into the merge zone.
+
+    "Gets stuck?" analysis:
+      After a successful abort (ego returns to y=4), algorithms re-evaluate at every step.
+      Once the moving car clears the middle lane, the nominal S-curve is certifiable again
+      and ego resumes it automatically. True deadlock only if abort triggered AFTER x=62.8m
+      (abort itself collides with stalled car) — prevented by the T_b=1.5s horizon.
 
     Args:
         algo_type:        'gatekeeper', 'mps', or 'backupcbf'
         stalled_x_offset: x-distance from ego to stalled car in upper lane [m]
         moving_x_offset:  initial x of moving car in middle lane relative to ego [m]
-        moving_vx:        x-velocity of moving car [m/s] (negative = oncoming)
+        moving_vx:        x-velocity of moving car [m/s] (positive = same direction)
         save_animation:   whether to save animation as video
         expected_collision: whether a collision is expected (for pass/fail tracking)
     """
@@ -951,26 +1299,51 @@ def main():
     )
     parser.add_argument('--algo', type=str, default='gatekeeper', choices=ALGO_TYPES,
                         help='Shielding algorithm (default: gatekeeper)')
-    parser.add_argument('--stalled', type=float, default=50.0,
-                        help='x-offset of stalled car in upper lane, m (default: 50)')
-    parser.add_argument('--moving', type=float, default=80.0,
+    parser.add_argument('--stalled', type=float, default=80.0,
+                        help='x-offset of stalled car in upper lane, m (default: 80)')
+    parser.add_argument('--moving', type=float, default=-10.0,
                         help='x-offset of moving car in middle lane relative to ego, m '
-                             '(default: 80 for oncoming scenario)')
-    parser.add_argument('--moving-vx', type=float, default=-10.0,
-                        help='vx of moving car in m/s (negative=oncoming, default: -10)')
+                             '(default: -10 for catching-up scenario)')
+    parser.add_argument('--moving-vx', type=float, default=12.0,
+                        help='vx of moving car in m/s (positive=same dir, default: 12)')
     parser.add_argument('--sweep', action='store_true',
                         help='Sweep moving_x_offset across all algorithms')
-    parser.add_argument('--sweep-stalled', type=float, default=50.0,
-                        help='stalled_x_offset to use during sweep (default: 50)')
+    parser.add_argument('--sweep-stalled', type=float, default=80.0,
+                        help='stalled_x_offset to use during sweep (default: 80)')
     parser.add_argument('--save', action='store_true',
                         help='Save animation as video')
     parser.add_argument('--figure', action='store_true',
                         help='Generate trajectory overlay figure for all three algorithms')
     parser.add_argument('--figure-out', type=str, default='output/merge_zone_comparison.png',
                         help='Output path for the trajectory figure (default: output/merge_zone_comparison.png)')
+    parser.add_argument('--list', action='store_true',
+                        help='Print the run registry table and exit')
+    parser.add_argument('--regen-stale', action='store_true',
+                        help='Re-run any registry entries whose output files are missing or code has changed')
     args = parser.parse_args()
 
-    if args.figure:
+    if args.list:
+        registry = RunRegistry()
+        print(f"\nRun registry ({RunRegistry.CSV_PATH}):")
+        registry.print_table()
+    elif args.regen_stale:
+        registry = RunRegistry()
+        stale = registry.find_stale()
+        if not stale:
+            print("All registry entries are up-to-date.")
+        else:
+            print(f"Found {len(stale)} stale entry/entries — regenerating...")
+            for record in stale:
+                print(f"\n  → {record.run_id}")
+                config = create_merge_zone_test(
+                    algo_type=record.algo,
+                    stalled_x_offset=record.stalled_x,
+                    moving_x_offset=record.moving_x,
+                    moving_vx=record.moving_vx,
+                    save_animation=bool(record.animation_path),
+                )
+                run_test(config)
+    elif args.figure:
         generate_trajectory_figure(
             stalled_x_offset=args.stalled,
             moving_x_offset=args.moving,
