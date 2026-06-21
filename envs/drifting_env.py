@@ -13,6 +13,33 @@ for collision checking. Supports straight, oval, and L-shaped track types.
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon as MplPolygon
+
+
+def _idm_accel(follower: dict, leader: dict, params: dict) -> float:
+    """Compute IDM acceleration for a car-following scenario.
+
+    Args:
+        follower: Dict with 'x', 'vx', optionally 'length' (default 4.5 m).
+        leader:   Dict with 'x', 'vx', optionally 'length' (default 4.5 m).
+        params:   IDM parameters — v0, T, s0, a_max, b_comfort.
+
+    Returns:
+        Longitudinal acceleration [m/s²].
+    """
+    v    = float(follower.get('vx', 0.0))
+    v_l  = float(leader.get('vx', 0.0))
+    f_len = float(follower.get('length', follower.get('body_length', 4.5)))
+    l_len = float(leader.get('length', leader.get('body_length', 4.5)))
+    # bumper-to-bumper gap (clamped > 0 to avoid division by zero)
+    s = max((leader['x'] - l_len / 2) - (follower['x'] + f_len / 2), 0.001)
+    dv   = v - v_l                                   # approach rate (positive = closing)
+    v0   = float(params.get('v0', 12.0))
+    T    = float(params.get('T', 1.5))
+    s0   = float(params.get('s0', 2.0))
+    a    = float(params.get('a_max', 2.0))
+    b    = float(params.get('b_comfort', 3.0))
+    s_star = s0 + max(v * T + v * dv / (2.0 * np.sqrt(a * b)), 0.0)
+    return a * (1.0 - (v / v0) ** 4 - (s_star / s) ** 2)
 from matplotlib.collections import PatchCollection
 
 
@@ -649,9 +676,28 @@ class DriftingEnv:
         for patch in obstacle['patches']:
             self.ax.add_patch(patch)
     
-    def step_dynamic_obstacles(self, dt):
-        """Advance moving obstacles by one timestep."""
-        for obstacle in self.dynamic_obstacles:
+    def step_dynamic_obstacles(self, dt, leader_states=None):
+        """Advance moving obstacles by one timestep.
+
+        Args:
+            dt: Timestep [s].
+            leader_states: Optional list of leader dicts (one per dynamic obstacle).
+                Each entry: {'x': ..., 'vx': ..., 'length': ...} or None for free-flow.
+                When a leader is provided and the obstacle has 'use_idm': True, the
+                obstacle's vx is updated via the IDM before position integration.
+        """
+        for i, obstacle in enumerate(self.dynamic_obstacles):
+            leader = (leader_states[i]
+                      if leader_states is not None and i < len(leader_states)
+                      else None)
+            spec = obstacle.get('spec', {})
+            use_idm = obstacle.get('use_idm', spec.get('use_idm', False))
+            idm_params_src = obstacle.get('idm_params', spec.get('idm_params', {}))
+            if leader is not None and use_idm:
+                idm_p = idm_params_src
+                a = _idm_accel(obstacle, leader, idm_p)
+                v_max = float(idm_p.get('v0', 20.0))
+                obstacle['vx'] = float(np.clip(obstacle.get('vx', 0.0) + a * dt, 0.0, v_max))
             obstacle['x'] += obstacle.get('vx', 0.0) * dt
             obstacle['y'] += obstacle.get('vy', 0.0) * dt
             if obstacle.get('patches'):

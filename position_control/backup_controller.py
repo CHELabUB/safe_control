@@ -122,7 +122,32 @@ class LaneChangeController(BackupController):
         self.tau_dot_max = robot_spec.get('tau_dot_max', 8000.0)
         
         self.theta_des_max = np.deg2rad(20)
-    
+
+        # Headway limit state (set per-step via set_headway_limit())
+        self._headway_lead_x = None
+        self._headway_lead_len = 4.5
+        self._headway_tau = 0.0
+        self._ego_length = self.robot_spec.get('body_length', 4.5)
+
+    def set_headway_limit(self, lead_x: float, lead_length: float, tau: float) -> None:
+        """Set the headway constraint for the current backup step.
+
+        During abort backup (returning to ego lane), ego may approach the stalled
+        car ahead. Calling this each step ensures the velocity target is reduced
+        proportionally so s_bumper >= v * tau.
+        """
+        self._headway_lead_x = float(lead_x)
+        self._headway_lead_len = float(lead_length)
+        self._headway_tau = float(tau)
+
+    def _effective_v_target(self, x: float) -> float:
+        """Headway-limited velocity target: min(v_ref, s_bumper / tau)."""
+        if self._headway_tau <= 0 or self._headway_lead_x is None:
+            return self.target_velocity
+        s_bumper = (self._headway_lead_x - self._headway_lead_len / 2) - (x + self._ego_length / 2)
+        v_headway = max(0.5, s_bumper / self._headway_tau)
+        return min(self.target_velocity, v_headway)
+
     def compute_control(self, state, target_y):
         """
         Compute control input for lane change using cascaded PD control.
@@ -181,8 +206,8 @@ class LaneChangeController(BackupController):
         delta_dot = np.clip(delta_dot, -self.delta_dot_max, self.delta_dot_max)
         
         # ===== Velocity control =====
-        # Maintain target velocity during lane change
-        V_error = self.target_velocity - V
+        # Maintain target velocity (headway-limited if set_headway_limit() was called)
+        V_error = self._effective_v_target(x) - V
         tau_des = self.Kp_v * V_error
         tau_des = np.clip(tau_des, -self.tau_max, self.tau_max)
         

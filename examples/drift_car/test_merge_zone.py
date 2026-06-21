@@ -158,6 +158,21 @@ class VehicleConfig:
 
 
 @dataclass
+class IDMConfig:
+    """Intelligent Driver Model parameters for the center-lane moving car."""
+    enabled: bool = False
+    v0: float = 12.0        # desired speed [m/s]
+    T: float = 1.5          # desired time headway [s]
+    s0: float = 2.0         # minimum jam gap [m]
+    a_max: float = 2.0      # max acceleration [m/s²]
+    b_comfort: float = 3.0  # comfortable deceleration [m/s²]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {'v0': self.v0, 'T': self.T, 's0': self.s0,
+                'a_max': self.a_max, 'b_comfort': self.b_comfort}
+
+
+@dataclass
 class SimulationConfig:
     dt: float = 0.05
     tf: float = 15.0
@@ -167,6 +182,7 @@ class SimulationConfig:
     safety_margin: float = 0.01
     initial_velocity: float = 10.0
     target_velocity: float = 10.0
+    time_headway_tau: float = 0.0   # 0 = disabled; e.g. 2.0 to enable headway CBF
 
 
 @dataclass
@@ -176,6 +192,7 @@ class TestConfig:
     track: TrackConfig
     vehicle: VehicleConfig
     simulation: SimulationConfig
+    idm: IDMConfig = field(default_factory=IDMConfig)
     stalled_x_offset: float = 80.0   # x of stalled car in upper lane (relative to ego)
     moving_x_offset: float = -10.0   # x of moving car in middle lane (relative to ego)
     moving_vx: float = 12.0          # vx of moving car (negative = oncoming, positive = same dir)
@@ -390,6 +407,8 @@ def setup_vehicle(
     robot_spec = config.vehicle.to_dict()
     robot_spec['v_ref'] = config.simulation.target_velocity
     robot_spec['safety_margin'] = config.simulation.safety_margin
+    robot_spec['time_headway_tau'] = config.simulation.time_headway_tau
+    robot_spec['lane_width'] = config.track.lane_width
     car = DriftingCar(X0, robot_spec, config.simulation.dt, ax)
 
     return car, X0, ego_lane_y, backup_lane_y
@@ -493,18 +512,23 @@ def setup_obstacles(config: TestConfig, env: DriftingEnv):
     )
     print(f"  Stalled car: x={config.stalled_x_offset:.1f}, y={stalled_y:.2f} (upper lane)")
 
-    # Moving car: dynamic obstacle in middle lane at constant velocity
+    # Moving car: dynamic obstacle in middle lane (constant velocity or IDM)
     moving_y = env.get_lane_center(track.middle_lane_idx)
+    moving_spec = dict(obstacle_spec)
+    if config.idm.enabled:
+        moving_spec['use_idm'] = True
+        moving_spec['idm_params'] = config.idm.to_dict()
     env.add_moving_obstacle_car(
         x=config.moving_x_offset,
         y=moving_y,
         theta=0.0,
         vx=config.moving_vx,
         vy=0.0,
-        robot_spec=obstacle_spec,
+        robot_spec=moving_spec,
     )
+    idm_tag = " (IDM)" if config.idm.enabled else ""
     print(f"  Moving car:  x={config.moving_x_offset:+.1f}, y={moving_y:.2f} (middle lane), "
-          f"vx={config.moving_vx:.1f} m/s")
+          f"vx={config.moving_vx:.1f} m/s{idm_tag}")
 
 
 def setup_visualization(
@@ -547,6 +571,10 @@ def run_simulation(
 ) -> Dict[str, Any]:
     sim = config.simulation
     robot_spec = config.vehicle.to_dict()
+    tau = sim.time_headway_tau
+    use_idm = config.idm.enabled
+    track = config.track
+    ego_len = config.vehicle.body_length
 
     num_steps = int(sim.tf / sim.dt)
     window_size = (60, 20)
@@ -561,6 +589,32 @@ def run_simulation(
     for step in range(num_steps):
         state = car.get_state()
         pos = car.get_position()
+        x_ego, y_ego = float(pos[0]), float(pos[1])
+        V_ego = float(state[5])
+
+        # --- Layer 1: Headway-aware MPCC velocity reference ---
+        # Use half-lane-width threshold so headway only applies when ego and obstacle
+        # share the same lane center. Full lane_width would incorrectly trigger headway
+        # for adjacent-lane obstacles during the S-curve merge.
+        if tau > 0:
+            v_safe = sim.target_velocity
+            same_lane_thr = track.lane_width / 2
+            # Static obstacles (stalled car): MPCC already routes around via S-curve,
+            # so headway to static obstacles in Layer 1 is not applied here.
+            for obs in env.dynamic_obstacles:
+                obs_x = obs.get('x', 0.0)
+                obs_y = obs.get('y', 0.0)
+                obs_vx = obs.get('vx', 0.0)
+                obs_len = obs.get('spec', {}).get('body_length', ego_len)
+                # Only slow for moving lead vehicles that are slower than ego (approaching).
+                # If the lead is pulling away (obs_vx >= V_ego), no headway action needed.
+                if (obs_x > x_ego and abs(obs_y - y_ego) < same_lane_thr
+                        and obs_vx < V_ego):
+                    s_bumper = (obs_x - obs_len / 2) - (x_ego + ego_len / 2)
+                    if s_bumper > 0:
+                        v_safe = min(v_safe, max(0.5, s_bumper / tau))
+            if v_safe < sim.target_velocity:
+                mpcc.set_velocity_reference(v_safe)
 
         # Get MPCC nominal plan (S-curve path)
         try:
@@ -572,6 +626,24 @@ def run_simulation(
             print(f"MPCC error at step {step}: {e}")
             pred_states, pred_controls = None, None
 
+        # --- Layer 2: Headway-aware backup controller velocity (dynamic obstacles only) ---
+        # Static stalled car clearance during abort is enforced by shielding (Euclidean).
+        # Headway limit here applies only to dynamic (moving) lead vehicles in the backup lane.
+        if tau > 0 and hasattr(shielding, 'backup_controller'):
+            bc = shielding.backup_controller
+            if hasattr(bc, 'set_headway_limit'):
+                backup_target_y = getattr(shielding, 'backup_target', y_ego)
+                lead_x, lead_len = None, ego_len
+                for obs in env.dynamic_obstacles:
+                    obs_x = obs.get('x', 0.0)
+                    obs_y = obs.get('y', 0.0)
+                    obs_len = obs.get('spec', {}).get('body_length', ego_len)
+                    if obs_x > x_ego and abs(obs_y - backup_target_y) < track.lane_width:
+                        if lead_x is None or obs_x < lead_x:
+                            lead_x, lead_len = obs_x, obs_len
+                if lead_x is not None:
+                    bc.set_headway_limit(lead_x, lead_len, tau)
+
         # Shielding validates and returns committed control
         U = shielding.solve_control_problem(state, friction=car.get_friction())
 
@@ -581,8 +653,20 @@ def run_simulation(
         else:
             nominal_steps += 1
 
-        # Step physics (also steps dynamic obstacles internally)
-        result = simulator.step(U)
+        # --- IDM moving car + physics step ---
+        if use_idm and env.dynamic_obstacles:
+            moving_obs = env.dynamic_obstacles[0]
+            moving_y = moving_obs.get('y', 0.0)
+            # Leader = ego if ego is ahead in center lane
+            in_center = abs(y_ego - moving_y) < (track.lane_width / 2)
+            if in_center and x_ego > moving_obs['x'] + 1.0:
+                leader = {'x': x_ego, 'vx': V_ego, 'length': ego_len}
+            else:
+                leader = None
+            result = simulator.step(U, skip_obstacle_step=True)
+            env.step_dynamic_obstacles(sim.dt, leader_states=[leader])
+        else:
+            result = simulator.step(U)
 
         # Update visualizations
         ref_horizon = mpcc.get_reference_horizon()
@@ -1186,6 +1270,8 @@ def create_merge_zone_test(
     moving_vx: float = 12.0,
     save_animation: bool = False,
     expected_collision: bool = False,
+    time_headway_tau: float = 0.0,
+    idm_enabled: bool = False,
 ) -> TestConfig:
     """
     Create a merge zone test configuration.
@@ -1229,7 +1315,8 @@ def create_merge_zone_test(
         description=desc,
         track=TrackConfig(),
         vehicle=VehicleConfig(mu=1.0),
-        simulation=SimulationConfig(),
+        simulation=SimulationConfig(time_headway_tau=time_headway_tau),
+        idm=IDMConfig(enabled=idm_enabled),
         stalled_x_offset=stalled_x_offset,
         moving_x_offset=moving_x_offset,
         moving_vx=moving_vx,
@@ -1316,6 +1403,10 @@ def main():
                         help='Generate trajectory overlay figure for all three algorithms')
     parser.add_argument('--figure-out', type=str, default='output/merge_zone_comparison.png',
                         help='Output path for the trajectory figure (default: output/merge_zone_comparison.png)')
+    parser.add_argument('--tau', type=float, default=0.0,
+                        help='Time headway tau [s] for headway CBF (0 = disabled, e.g. 2.0 to enable)')
+    parser.add_argument('--idm', action='store_true',
+                        help='Enable IDM (Intelligent Driver Model) for the center-lane moving car')
     parser.add_argument('--list', action='store_true',
                         help='Print the run registry table and exit')
     parser.add_argument('--regen-stale', action='store_true',
@@ -1359,6 +1450,8 @@ def main():
             moving_x_offset=args.moving,
             moving_vx=args.moving_vx,
             save_animation=args.save,
+            time_headway_tau=args.tau,
+            idm_enabled=args.idm,
         )
         run_test(config)
 

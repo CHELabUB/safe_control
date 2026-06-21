@@ -59,6 +59,7 @@ class MPCC:
         self.Q_v = 20.0      # Velocity tracking
         self.Q_r = 10.0      # Yaw rate penalty (to reduce oscillation)
         self.v_ref = 5.0     # Target velocity [m/s]
+        self._current_v_ref = self.v_ref  # Updated per-step via set_velocity_reference()
         # Control weights: [delta_dot, tau_dot, v_psi]
         # All weights must be non-negative for proper cost minimization
         self.R = np.array([50.0, 0.01, 0.1])
@@ -102,8 +103,9 @@ class MPCC:
         # Controls: [delta_dot, tau_dot, v_psi]
         _u = model.set_variable(var_type='_u', var_name='u', shape=(self.n_controls, 1))
         
-        # TVP for path reference
+        # TVP for path reference and velocity reference
         _path_ref = model.set_variable(var_type='_tvp', var_name='path_ref', shape=(3, 1))
+        _v_ref_tvp = model.set_variable(var_type='_tvp', var_name='v_ref_tvp', shape=(1, 1))
         
         # Extract states
         x_pos = _x[0, 0]
@@ -178,8 +180,8 @@ class MPCC:
         # This ensures the error is always in [-pi, pi]
         e_theta = ca.atan2(ca.sin(theta - theta_ref), ca.cos(theta - theta_ref))
         
-        # Velocity error (keep velocity near target)
-        e_v = V - self.v_ref
+        # Velocity error (keep velocity near target; v_ref is a TVP updated per-step)
+        e_v = V - _v_ref_tvp[0, 0]
         
         cost = (self.Q_c * e_c**2 + 
                 self.Q_l * e_l**2 + 
@@ -259,23 +261,24 @@ class MPCC:
         """Set time-varying parameters function."""
         def tvp_fun(t_now):
             tvp_template = mpc.get_tvp_template()
-            
+
             # Store reference horizon for visualization
             ref_horizon_x = []
             ref_horizon_y = []
-            
+
             for k in range(self.horizon + 1):
                 psi_k = self._current_psi + k * self.v_psi_ref * self.dt
                 x_ref, y_ref, theta_ref, _ = self._get_path_reference(psi_k)
                 tvp_template['_tvp', k, 'path_ref'] = np.array([x_ref, y_ref, theta_ref])
+                tvp_template['_tvp', k, 'v_ref_tvp'] = np.array([[self._current_v_ref]])
                 ref_horizon_x.append(x_ref)
                 ref_horizon_y.append(y_ref)
-            
+
             # Store for visualization
             self.reference_horizon = np.array([ref_horizon_x, ref_horizon_y])
-                
+
             return tvp_template
-        
+
         mpc.set_tvp_fun(tvp_fun)
         return mpc
     
@@ -284,10 +287,12 @@ class MPCC:
         simulator = do_mpc.simulator.Simulator(self.model)
         simulator.set_param(t_step=self.dt)
         tvp_template = simulator.get_tvp_template()
-        
+
         def tvp_fun(t_now):
+            # Simulator TVP only needs to return a valid structure; v_ref_tvp default (0)
+            # is fine here since the simulator is used only for internal state propagation.
             return tvp_template
-        
+
         simulator.set_tvp_fun(tvp_fun)
         simulator.setup()
         return simulator
@@ -444,11 +449,14 @@ class MPCC:
         
         # Store predictions
         self._store_predictions()
-        
+
         # Update simulator
         y_next = self.simulator.make_step(u_mpc)
         x_next = self.estimator.make_step(y_next)
-        
+
+        # Reset per-step velocity override to nominal
+        self._current_v_ref = self.v_ref
+
         return u_mpc[:2]
     
     def _store_predictions(self):
@@ -508,10 +516,19 @@ class MPCC:
             self.Q_r = Q_r
         if v_ref is not None:
             self.v_ref = v_ref
+            self._current_v_ref = v_ref
         if R is not None:
             self.R = np.array(R)
         self.setup_control_problem()
     
+    def set_velocity_reference(self, v_ref: float) -> None:
+        """Override velocity reference for the next solve only (single-use per step).
+
+        Used for headway-aware speed regulation: call before solve_control_problem()
+        with v_ref = min(nominal_v_ref, s_bumper / tau).
+        """
+        self._current_v_ref = float(v_ref)
+
     def set_progress_rate(self, v_psi_ref):
         """Set desired progress rate."""
         self.v_psi_ref = v_psi_ref

@@ -420,7 +420,14 @@ class Gatekeeper:
                 )
                 if collision:
                     return (True, "Moving Obstacle") if return_reason else True
-        
+
+        # Headway constraint: s_bumper - V_ego * tau >= 0
+        tau = self.robot_spec.get('time_headway_tau', 0.0)
+        if tau > 0 and len(state) > 5:
+            hw_result = self._check_headway(state, obstacle_state, tau, return_reason)
+            if hw_result is not None:
+                return hw_result
+
         return (False, "None") if return_reason else False
     
     def _iter_obstacles(self, obstacle_state):
@@ -431,6 +438,32 @@ class Gatekeeper:
             return [obs for obs in obstacle_state if obs is not None]
         return [obstacle_state]
     
+    def _check_headway(self, state, obstacle_state, tau, return_reason):
+        """Check headway constraint s_bumper - V_ego * tau >= 0 for moving lead obstacles.
+
+        Returns a collision result tuple/bool if violated, otherwise None.
+        Applied only to dynamic obstacles (car-following context) in the same lane.
+        Static obstacles (stalled car) are already handled by Euclidean clearance.
+        """
+        if obstacle_state is None:
+            return None
+        x, y = float(state[0]), float(state[1])
+        V_ego = float(state[5])
+        ego_len = self.robot_spec.get('body_length', 4.5)
+        lane_thr = self.robot_spec.get('lane_width', 4.0)
+
+        for obs in self._iter_obstacles(obstacle_state):
+            obs_x = obs.get('x', 0.0)
+            obs_y = obs.get('y', 0.0)
+            obs_vx = obs.get('vx', 0.0)
+            obs_len = obs.get('length', obs.get('body_length', 4.5))
+            # Only check headway when ego is approaching the lead (lead not pulling away)
+            if obs_x > x and abs(obs_y - y) < lane_thr and obs_vx <= V_ego:
+                s_bumper = (obs_x - obs_len / 2) - (x + ego_len / 2)
+                if s_bumper - V_ego * tau < 0:
+                    return (True, "Headway") if return_reason else True
+        return None
+
     def _check_moving_obstacle_collision(self, position, robot_radius, obstacle):
         """
         Check collision with a moving obstacle at a specific state.
