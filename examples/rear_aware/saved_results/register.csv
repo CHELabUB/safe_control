@@ -1,0 +1,4 @@
+run_name,timestamp,fingerprint,scenario,ego_model,sensitivity,rear_model,assumed_rear_model,rear_kappa,rear_a_decel,gap_r0,mismatch,note,config_path
+run_001,2026-06-25T10:55:23,85a110d4e3b9,three_car,ovm,,ovm,,0.7,2.5,18.0,,,run_001/config.json
+run_002,2026-06-25T10:55:52,72f22066351e,ego_rear,ovm,analytic,ovm,ovm,1.0,2.0,3.0,False,,run_002/config.json
+run_003,2026-06-25T13:51:12,846f7b2a4618,ego_rear,ovm,analytic,ovm,ovm,1.0,2.0,3.0,False,,run_003/config.json

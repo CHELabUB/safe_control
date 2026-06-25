@@ -32,9 +32,9 @@ L_COMBINED = BODY_LENGTH
 
 # Register columns (superset across scenarios) so both scripts write a consistent
 # header into a shared register.csv; unused fields are left blank per row.
-REGISTER_COLUMNS = ['scenario', 'ego_model', 'sensitivity', 'rear_model',
-                    'assumed_rear_model', 'rear_kappa', 'rear_a_decel', 'gap_r0',
-                    'mismatch', 'note']
+REGISTER_COLUMNS = ['scenario', 'ego_model', 'ego_target', 'v_desired', 'sensitivity',
+                    'rear_model', 'assumed_rear_model', 'rear_kappa', 'rear_a_decel',
+                    'gap_r0', 'mismatch', 'note']
 
 
 def resolve(val, default):

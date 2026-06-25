@@ -41,6 +41,32 @@ def ego_stop_nominal(ego: dict, stop_wall_x: float, params: dict,
     return nominal_accel(model, ego, wall, params)
 
 
+def ego_speed_nominal(ego: dict, v_desired: float, params: dict,
+                      model: str = 'ovm') -> float:
+    """Ego nominal that regulates to an arbitrary target speed ``v_desired`` (no wall).
+
+    With no lead vehicle, the car-following feedback is repurposed for pure speed
+    regulation by placing a virtual leader far ahead moving at ``v_desired`` and
+    capping the desired-speed parameters to ``v_desired``:
+
+      OVM: Vh -> v_desired and W -> v_desired, so
+           vdot = (alpha + beta) * (v_desired - v).
+      IDM: with v0 = v_desired and the interaction term vanishing (huge gap),
+           vdot -> a * (1 - (v / v_desired)**4)   (free-road regulation to v_desired).
+
+    Args:
+        ego: ego car dict {'x','vx','length'}.
+        v_desired: target cruise speed [m/s].
+        params: model params (OVM and IDM keys; see nominal_accel).
+        model: 'ovm' or 'idm'.
+    """
+    p = dict(params)
+    p['v_max'] = v_desired      # OVM Vh / W cap
+    p['v0'] = v_desired         # IDM free-road speed
+    far_lead = {'x': float(ego['x']) + 1e6, 'vx': float(v_desired), 'length': 0.0}
+    return nominal_accel(model, ego, far_lead, p)
+
+
 def rear_accel(rear: dict, ego: dict, model: str, params: dict) -> float:
     """Rear vehicle car-following acceleration; its leader is the ego (no filter).
 

@@ -27,7 +27,7 @@ import numpy as np
 from rear_aware_common import (plt, LW, BODY_LENGTH, L_COMBINED, REGISTER_COLUMNS,
                                resolve, registry_run, save_figure, _HERE)
 from double_integrator_1d import DoubleIntegrator1D                # noqa: E402
-from rear_aware_models import rear_accel, ego_stop_nominal         # noqa: E402
+from rear_aware_models import rear_accel, ego_stop_nominal, ego_speed_nominal  # noqa: E402
 from rear_backup_cbf import RearEndBackupCBF1D                     # noqa: E402
 from coupled_rear_cbf import CoupledRearCBF                        # noqa: E402
 from run_registry import RunRegistry                               # noqa: E402
@@ -77,8 +77,12 @@ def simulate_ego_rear(cfg, dt, n_sim, mode):
             ego_d = {'x': xe[0], 'vx': xe[1], 'length': BODY_LENGTH}
             rear_d = {'x': xr[0], 'vx': xr[1], 'length': BODY_LENGTH}
 
-            u_nom = ego_stop_nominal(ego_d, cfg['stop_wall_x'], cfg['ego_nom'],
-                                     cfg['ego_model'])
+            if cfg['ego_target'] == 'speed':
+                u_nom = ego_speed_nominal(ego_d, cfg['v_desired'], cfg['ego_nom'],
+                                          cfg['ego_model'])
+            else:
+                u_nom = ego_stop_nominal(ego_d, cfg['stop_wall_x'], cfg['ego_nom'],
+                                         cfg['ego_model'])
             if cbf is not None:
                 cbf.set_rear_state(xr[0], xr[1])
                 cbf.set_nominal_controller(lambda x, _u=u_nom: np.array([_u]))
@@ -110,7 +114,7 @@ def simulate_ego_rear(cfg, dt, n_sim, mode):
 def make_figure(base, backup, hocbf, cfg, t_state, t_ctrl, save_dir, footnote):
     fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
     axp, axg, axv, axu = axes
-    stop = cfg['stop_wall_x']
+    speed_mode = cfg['ego_target'] == 'speed'
     series = [('baseline', base, 'tab:red'),
               ('backup CBF', backup, 'tab:green'),
               ('HOCBF (coupled)', hocbf, 'tab:blue')]
@@ -118,7 +122,8 @@ def make_figure(base, backup, hocbf, cfg, t_state, t_ctrl, save_dir, footnote):
     for tag, d, c in series:
         axp.plot(t_state, d['s_ego'], color=c, lw=LW, label=f'Ego ({tag})')
         axp.plot(t_state, d['s_rear'], color=c, lw=LW, ls='--')
-    axp.axhline(stop, color='k', ls=':', lw=2, label='stop target')
+    if not speed_mode:
+        axp.axhline(cfg['stop_wall_x'], color='k', ls=':', lw=2, label='stop target')
     axp.set_ylabel('position [m]'); axp.set_title('Positions (ego solid, rear dashed)')
     axp.legend(ncol=2, fontsize=9); axp.grid(alpha=0.3)
 
@@ -133,6 +138,8 @@ def make_figure(base, backup, hocbf, cfg, t_state, t_ctrl, save_dir, footnote):
     for tag, d, c in series:
         axv.plot(t_state, d['v_ego'], color=c, lw=LW, label=f'Ego ({tag})')
         axv.plot(t_state, d['v_rear'], color=c, lw=LW, ls='--')
+    if speed_mode:
+        axv.axhline(cfg['v_desired'], color='k', ls=':', lw=2, label='target speed')
     axv.set_ylabel('velocity [m/s]'); axv.set_title('Velocities (ego solid, rear dashed)')
     axv.legend(ncol=2, fontsize=9); axv.grid(alpha=0.3)
 
@@ -143,8 +150,12 @@ def make_figure(base, backup, hocbf, cfg, t_state, t_ctrl, save_dir, footnote):
     axu.set_ylabel('ego accel [m/s^2]'); axu.set_xlabel('time [s]'); axu.set_title('Ego control')
     axu.legend(fontsize=9); axu.grid(alpha=0.3)
 
-    fig.suptitle('Ego + rear: backup CBF escapes (abandons stop); '
-                 'coupled HOCBF brakes gently to ride the safe boundary')
+    if speed_mode:
+        fig.suptitle(f"Ego + rear: ego regulates to v_desired={cfg['v_desired']} m/s; "
+                     'backup CBF escapes; coupled HOCBF rides the safe boundary')
+    else:
+        fig.suptitle('Ego + rear: backup CBF escapes (abandons stop); '
+                     'coupled HOCBF brakes gently to ride the safe boundary')
     save_figure(fig, save_dir, 'ego_rear.png', footnote)
 
 
@@ -172,6 +183,7 @@ def build_cfg(args):
             rear_assumed[key] = val
     return {
         'scenario': 'ego_rear', 'ego_model': args.ego_model,
+        'ego_target': args.ego_target, 'v_desired': resolve(args.v_desired, v_road),
         'sensitivity': args.sensitivity,
         's_ego0': 0.0, 'v_ego0': args.ego_v0, 'gap_r0': resolve(args.gap_r0, 3.0),
         'stop_wall_x': args.stop_distance, 'd_min': args.d_min,
@@ -192,6 +204,12 @@ def build_parser():
     p.add_argument('--gamma', type=float, default=1.0)
     p.add_argument('--ego-model', choices=['ovm', 'idm'], default='ovm',
                    help='ego nominal car-following model (used to stop at the target)')
+    p.add_argument('--ego-target', choices=['speed', 'stop'], default='speed',
+                   help="ego nominal objective: 'speed' regulates to --v-desired (no "
+                        "wall); 'stop' decelerates to the virtual wall at --stop-distance")
+    p.add_argument('--v-desired', type=float, default=1.0,
+                   help='ego target cruise speed for --ego-target speed [m/s] '
+                        '(default: --v-road)')
     p.add_argument('--ego-v0', type=float, default=9.0, help='ego initial speed [m/s]')
     p.add_argument('--stop-distance', type=float, default=18.0,
                    help='ego stop target (virtual wall) ahead of start [m]')
@@ -256,6 +274,10 @@ def main():
     mhr_b, _ = _mm(base)
     mhr_k, vk = _mm(backup)
     mhr_h, vh = _mm(hocbf)
+    if cfg['ego_target'] == 'speed':
+        print(f"  ego target: regulate to v_desired = {cfg['v_desired']:.1f} m/s (no wall)")
+    else:
+        print(f"  ego target: stop at wall x = {cfg['stop_wall_x']:.1f} m")
     print(f"  baseline  : min h_r = {mhr_b:7.3f} m  ({'REAR-END' if mhr_b <= 0 else 'safe'})")
     print(f"  backup CBF: min h_r = {mhr_k:7.3f} m  (safe, escapes to v={vk:.1f})")
     print(f"  HOCBF     : min h_r = {mhr_h:7.3f} m  (safe, peak v={vh:.1f}, "
@@ -274,14 +296,17 @@ def main():
     rear_tag = cfg['rear_model']
     if cfg['rear_assumed_model'] != cfg['rear_model']:
         rear_tag += f"/assumed={cfg['rear_assumed_model']}"
+    ego_target_tag = (f"speed(v_des={cfg['v_desired']})" if cfg['ego_target'] == 'speed'
+                      else f"stop={args.stop_distance}")
     footnote = (f"ego_rear: ego={cfg['ego_model']}(u_acc={args.u_acc},"
-                f"stop={args.stop_distance}) rear={rear_tag}"
+                f"{ego_target_tag}) rear={rear_tag}"
                 f"(kappa={rp['kappa']},a_e={rp['a_e']}) "
                 f"gap_r0={cfg['gap_r0']} d_min={args.d_min} "
                 f"hocbf(a1={cfg['hocbf_a1']},a2={cfg['hocbf_a2']},"
                 f"rf={cfg['hocbf_robust_factor']}) mismatch={mismatch}")
     make_figure(base, backup, hocbf, cfg, t_state, t_ctrl, run.path, footnote)
     reg.commit(run, columns={'scenario': 'ego_rear', 'ego_model': cfg['ego_model'],
+                             'ego_target': cfg['ego_target'], 'v_desired': cfg['v_desired'],
                              'sensitivity': cfg['sensitivity'],
                              'rear_model': cfg['rear_model'],
                              'assumed_rear_model': cfg['rear_assumed_model'],

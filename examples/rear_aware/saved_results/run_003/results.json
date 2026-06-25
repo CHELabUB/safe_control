@@ -1,0 +1,10 @@
+{
+  "baseline_min_h_r": -1.1008074347157653,
+  "backup_min_h_r": 3.0,
+  "hocbf_min_h_r": 1.2217982268597734,
+  "backup_peak_v": 14.044104989369046,
+  "hocbf_peak_v": 9.0,
+  "baseline_rear_end": true,
+  "hocbf_safe": true,
+  "param_mismatch": false
+}

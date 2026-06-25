@@ -45,6 +45,14 @@ One simulation runs the ego **three ways** and overlays them:
 uv run python examples/rear_aware/run_ego_rear.py
 ```
 
+**Ego objective (`--ego-target`).** By default (`stop`) the ego decelerates to the
+virtual wall at `--stop-distance`. With `--ego-target speed --v-desired V` the ego instead
+performs an arbitrary **target-speed transition** to `V` (no wall): there is no lead, so
+the car-following lead-feedback is repurposed for speed regulation — OVM collapses to
+`v̇ = (alpha+beta)(V - v)`, IDM to free-road `a(1-(v/V)^4)`. A gentler, non-zero target
+generally makes rear-end safety easier to enforce (e.g. easing 9→5 m/s leaves even the
+unfiltered baseline safe). Works for both `--ego-model ovm|idm`.
+
 | controller | result | behavior |
 |---|---|---|
 | baseline (no filter) | `min h_r < 0` REAR-END | stops, is hit |
