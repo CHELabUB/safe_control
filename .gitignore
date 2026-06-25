@@ -4,6 +4,9 @@ __pycache__/
 
 # Ignore misc. files
 *.csv
+# with exception for CSVs anywhere under examples/*/saved_results/
+!examples/*/saved_results/*.csv
+!examples/*/saved_results/**/*.csv
 *.egg-info/
 .DS_Store
 uv.lock
