@@ -95,12 +95,28 @@ margin (`min h_r` 1.0 -> 0.23 in the default case) — visible as `mismatch=True
 `register.csv`.
 
 ### Backup-CBF details (contrast controller)
-Accelerate-to-`v_max` flow (STM mirrors the forward brake-to-stop), rollout safety
-`h_r(t) >= d_min`, terminal = positive gap at the horizon. The rear is predicted
-against the ego's escape with `--sensitivity {analytic,coupled}` (analytic ego STM
-with the rear as an exogenous moving obstacle vs. a finite-difference of the joint
-rollout). Both keep `h_r >= 0` because the escape is robust — but, per above, the
-*guarantee* is unsound for an interacting rear.
+Accelerate-to-`v_max` escape flow, rollout safety `h_r(t) >= d_min`, terminal =
+positive gap at the horizon. Because the rear **reacts to the ego**, the plant is
+**augmented** to the joint state `[s_e, v_e, s_r, v_r]` with the rear's assumed reaction
+`a_rear(x)` folded into the drift (`x_dot = f(x) + g(x) u`, `f = [v_e, 0, v_r, a_rear(x)]`,
+`g = [0, 1, 0, 0]`). The backup flow and its **sensitivity matrix** `S_i = dφ_i/dx0` then
+come from the framework's own `BackupCBF._integrate_backup_trajectory`
+(`position_control/backup_cbf_qp.py`) — a rigorous flow STM, not an end-to-end barrier
+finite difference — and the QP uses `∇h·S·g0 / ∇h·S·f0` with `∇h = [1,0,-1,0]` (no `dh/dt`,
+since the rear is a state, not an exogenous obstacle). It keeps `h_r >= 0` because the
+escape is robust — but, per above, the *guarantee* is unsound for an interacting rear.
+(Contrast: the forward `car_following` CBF stays a 2-state ego with an analytical STM,
+because the lead is exogenous and never enters the dynamics.)
+
+The terminal (gap-at-horizon) constraint and its gain are configurable:
+`--gamma-terminal G` sets the terminal class-K gain, and `--backup-terminal` /
+`--no-backup-terminal` includes or drops the terminal constraint. 
+There are known issue with infeasibility at the terminal state due to in sufficient
+yet hard to determined preview horizon. Can choose to drop it but better supply long
+enough horizon.
+ego_rear **drops it by default** (`--no-backup-terminal`); pass
+`--backup-terminal` to restore it. The `RearEndBackupCBF1D(use_terminal=...)` class
+default keeps the terminal.
 
 ## Parameter sweep
 

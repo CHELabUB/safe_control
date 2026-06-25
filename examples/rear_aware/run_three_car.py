@@ -19,7 +19,7 @@ import argparse
 import numpy as np
 
 from rear_aware_common import (plt, LW, BODY_LENGTH, L_COMBINED, REGISTER_COLUMNS,
-                               resolve, registry_run, save_figure, _HERE)
+                               resolve, registry_run, save_figure, qp_solver_stats, _HERE)
 from double_integrator_1d import DoubleIntegrator1D                # noqa: E402
 from car_following_models import nominal_accel, lead_velocity      # noqa: E402
 from car_following_cbf import CarFollowingCBF1D                    # noqa: E402
@@ -63,6 +63,7 @@ def simulate_three_car(cfg, dt, n_sim):
     out['h_r'] = np.zeros(n_sim)
     out['u_ego'] = np.zeros(n_sim)
     out['u_rear'] = np.zeros(n_sim)
+    out['qp_status'] = []                       # per-step forward CBF-QP solver status
     out['s_ego'][0], out['v_ego'][0] = xe
     out['s_rear'][0], out['v_rear'][0] = xr
 
@@ -76,6 +77,7 @@ def simulate_three_car(cfg, dt, n_sim):
 
             u_e_nom = nominal_accel(cfg['ego_model'], ego_d, lead, ego_nom)
             u_e = cbf.filter(u_e_nom, xe, s_lead[k], v_lead[k])
+            out['qp_status'].append(cbf.last_status)
             u_e = max(u_e, -xe[1] / dt)
 
             u_r = rear_accel(rear_d, ego_d, cfg['rear_model'], rear_params)
@@ -206,8 +208,14 @@ def main():
     print(f"  min h_f = {min_hf:.3f} m ({'SAFE' if min_hf > 0 else 'collide'} vs lead)")
     print(f"  min h_r = {min_hr:.3f} m ({'rear-end!' if min_hr <= 0 else 'safe'} from rear)")
 
+    ego_cbf_qp = qp_solver_stats(out['qp_status'])
+    print(f"  ego CBF-QP: {ego_cbf_qp['total_steps']} steps, "
+          f"infeasible={ego_cbf_qp['num_infeasible']}, failure={ego_cbf_qp['num_failure']}, "
+          f"unbounded={ego_cbf_qp['num_unbounded']}, inaccurate={ego_cbf_qp['num_inaccurate']} "
+          f"({'healthy' if ego_cbf_qp['healthy'] else 'UNHEALTHY'})")
     results = {'min_h_f': min_hf, 'min_h_r': min_hr,
-               'rear_end': bool(min_hr <= 0), 'front_collision': bool(min_hf <= 0)}
+               'rear_end': bool(min_hr <= 0), 'front_collision': bool(min_hf <= 0),
+               'ego_cbf_qp': ego_cbf_qp}
     with open(os.path.join(run.path, 'results.json'), 'w') as fh:
         json.dump(results, fh, indent=2)
 

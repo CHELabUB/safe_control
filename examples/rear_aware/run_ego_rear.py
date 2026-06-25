@@ -25,7 +25,7 @@ import argparse
 import numpy as np
 
 from rear_aware_common import (plt, LW, BODY_LENGTH, L_COMBINED, REGISTER_COLUMNS,
-                               resolve, registry_run, save_figure, _HERE)
+                               resolve, registry_run, save_figure, qp_solver_stats, _HERE)
 from double_integrator_1d import DoubleIntegrator1D                # noqa: E402
 from rear_aware_models import rear_accel, ego_stop_nominal, ego_speed_nominal  # noqa: E402
 from rear_backup_cbf import RearEndBackupCBF1D                     # noqa: E402
@@ -51,7 +51,8 @@ def simulate_ego_rear(cfg, dt, n_sim, mode):
             ego, dict(rspec), dt=dt, backup_horizon=cfg['backup_horizon'],
             u_acc=u_acc, v_max=v_max, L=L, d_min=cfg['d_min'],
             rear_model=cfg['rear_assumed_model'], rear_params=cfg['rear_assumed'],
-            sensitivity=cfg['sensitivity'], gamma=cfg['gamma'])
+            gamma=cfg['gamma'],
+            gamma_terminal=cfg['gamma_terminal'], use_terminal=cfg['backup_terminal'])
     hocbf = None
     if mode == 'hocbf':
         hocbf = CoupledRearCBF(
@@ -67,6 +68,7 @@ def simulate_ego_rear(cfg, dt, n_sim, mode):
     out['u_ego'] = np.zeros(n_sim)
     out['u_nom'] = np.zeros(n_sim)
     out['u_rear'] = np.zeros(n_sim)
+    out['qp_status'] = []                      # per-step solver/feasibility status (cbf or hocbf)
     out['s_ego'][0], out['v_ego'][0] = xe
     out['s_rear'][0], out['v_rear'][0] = xr
 
@@ -87,9 +89,11 @@ def simulate_ego_rear(cfg, dt, n_sim, mode):
                 cbf.set_rear_state(xr[0], xr[1])
                 cbf.set_nominal_controller(lambda x, _u=u_nom: np.array([_u]))
                 u_e = float(cbf.solve_control_problem(xe).flat[0])
+                out['qp_status'].append(cbf.last_status)
             elif hocbf is not None:
                 h_r = (xe[0] - L) - xr[0]
                 u_e = hocbf.filter(u_nom, h_r, xe[1], xr[1])
+                out['qp_status'].append(hocbf.last_status)
             else:
                 u_e = u_nom
             u_e = max(u_e, -xe[1] / dt)
@@ -184,11 +188,12 @@ def build_cfg(args):
     return {
         'scenario': 'ego_rear', 'ego_model': args.ego_model,
         'ego_target': args.ego_target, 'v_desired': resolve(args.v_desired, v_road),
-        'sensitivity': args.sensitivity,
         's_ego0': 0.0, 'v_ego0': args.ego_v0, 'gap_r0': resolve(args.gap_r0, 3.0),
         'stop_wall_x': args.stop_distance, 'd_min': args.d_min,
         'u_acc': args.u_acc, 'v_max': args.v_max, 'v_road': v_road,
-        'gamma': args.gamma, 'backup_horizon': args.backup_horizon,
+        'gamma': args.gamma, 'gamma_terminal': args.gamma_terminal,
+        'backup_terminal': args.backup_terminal,
+        'backup_horizon': args.backup_horizon,
         'hocbf_a1': args.hocbf_a1, 'hocbf_a2': args.hocbf_a2,
         'hocbf_robust_factor': args.hocbf_robust_factor,
         'ego_nom': ego_nom, 'rear_model': args.rear_model,
@@ -202,6 +207,12 @@ def build_parser():
     p.add_argument('--dt', type=float, default=0.05)
     p.add_argument('--tf', type=float, default=9.0)
     p.add_argument('--gamma', type=float, default=1.0)
+    p.add_argument('--gamma-terminal', type=float, default=2.0,
+                   help='backup-CBF terminal (gap-at-horizon) class-K gain')
+    p.add_argument('--backup-terminal', action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help='include the backup-CBF terminal constraint (--backup-terminal) '
+                        'or drop it (default for ego_rear)')
     p.add_argument('--ego-model', choices=['ovm', 'idm'], default='ovm',
                    help='ego nominal car-following model (used to stop at the target)')
     p.add_argument('--ego-target', choices=['speed', 'stop'], default='speed',
@@ -224,8 +235,6 @@ def build_parser():
     p.add_argument('--hocbf-robust-factor', type=float, default=1.0,
                    help='HOCBF robustness: <1 assumes the rear is that fraction as '
                         'responsive (worst-case); 1.0 = deterministic')
-    p.add_argument('--sensitivity', choices=['analytic', 'coupled'], default='analytic',
-                   help='backup-CBF rear-sensitivity (contrast controller only)')
     # Rear follower params (actual) and what the filter assumes.
     p.add_argument('--rear-model', choices=['ovm', 'idm'], default='ovm',
                    help='actual rear car-following model')
@@ -285,10 +294,21 @@ def main():
 
     mismatch = (cfg['rear_assumed'] != cfg['rear_actual']
                 or cfg['rear_assumed_model'] != cfg['rear_model'])
+    backup_qp = qp_solver_stats(backup['qp_status'])
+    print(f"  backup QP : {backup_qp['total_steps']} steps, "
+          f"infeasible={backup_qp['num_infeasible']}, failure={backup_qp['num_failure']}, "
+          f"unbounded={backup_qp['num_unbounded']}, inaccurate={backup_qp['num_inaccurate']} "
+          f"({'healthy' if backup_qp['healthy'] else 'UNHEALTHY'})")
+    # HOCBF is analytic (no QP); 'infeasible' here = required accel exceeded a_acc.
+    hocbf_feas = qp_solver_stats(hocbf['qp_status'])
+    print(f"  HOCBF feas: {hocbf_feas['total_steps']} steps, "
+          f"infeasible={hocbf_feas['num_infeasible']} "
+          f"({'healthy' if hocbf_feas['healthy'] else 'UNHEALTHY'})")
     results = {'baseline_min_h_r': mhr_b, 'backup_min_h_r': mhr_k, 'hocbf_min_h_r': mhr_h,
                'backup_peak_v': vk, 'hocbf_peak_v': vh,
                'baseline_rear_end': bool(mhr_b <= 0), 'hocbf_safe': bool(mhr_h > 0),
-               'param_mismatch': bool(mismatch)}
+               'param_mismatch': bool(mismatch),
+               'backup_qp': backup_qp, 'hocbf_feasibility': hocbf_feas}
     with open(os.path.join(run.path, 'results.json'), 'w') as fh:
         json.dump(results, fh, indent=2)
 
@@ -302,12 +322,13 @@ def main():
                 f"{ego_target_tag}) rear={rear_tag}"
                 f"(kappa={rp['kappa']},a_e={rp['a_e']}) "
                 f"gap_r0={cfg['gap_r0']} d_min={args.d_min} "
+                f"backup(g={cfg['gamma']},gT={cfg['gamma_terminal']},"
+                f"term={cfg['backup_terminal']}) "
                 f"hocbf(a1={cfg['hocbf_a1']},a2={cfg['hocbf_a2']},"
                 f"rf={cfg['hocbf_robust_factor']}) mismatch={mismatch}")
     make_figure(base, backup, hocbf, cfg, t_state, t_ctrl, run.path, footnote)
     reg.commit(run, columns={'scenario': 'ego_rear', 'ego_model': cfg['ego_model'],
                              'ego_target': cfg['ego_target'], 'v_desired': cfg['v_desired'],
-                             'sensitivity': cfg['sensitivity'],
                              'rear_model': cfg['rear_model'],
                              'assumed_rear_model': cfg['rear_assumed_model'],
                              'rear_kappa': rp['kappa'], 'rear_a_decel': rp['a_e'],

@@ -13,11 +13,11 @@
   "v_road": 12.0,
   "gamma": 1.0,
   "gamma_terminal": 2.0,
-  "backup_terminal": true,
+  "backup_terminal": false,
   "backup_horizon": 5.0,
   "hocbf_a1": 1.0,
   "hocbf_a2": 1.0,
-  "hocbf_robust_factor": 1.0,
+  "hocbf_robust_factor": 0.0,
   "ego_nom": {
     "alpha": 0.6,
     "beta": 0.3,

@@ -32,7 +32,7 @@ L_COMBINED = BODY_LENGTH
 
 # Register columns (superset across scenarios) so both scripts write a consistent
 # header into a shared register.csv; unused fields are left blank per row.
-REGISTER_COLUMNS = ['scenario', 'ego_model', 'ego_target', 'v_desired', 'sensitivity',
+REGISTER_COLUMNS = ['scenario', 'ego_model', 'ego_target', 'v_desired',
                     'rear_model', 'assumed_rear_model', 'rear_kappa', 'rear_a_decel',
                     'gap_r0', 'mismatch', 'note']
 
@@ -40,6 +40,43 @@ REGISTER_COLUMNS = ['scenario', 'ego_model', 'ego_target', 'v_desired', 'sensiti
 def resolve(val, default):
     """CLI override if provided (not None), else the scenario-specific default."""
     return default if val is None else val
+
+
+def qp_solver_stats(statuses):
+    """Summarize per-step QP solver statuses into a health-stats dict for results.json.
+
+    Both CBF-QP controllers (CarFollowingCBF1D, RearEndBackupCBF1D) expose a
+    `last_status` per step (the cvxpy `prob.status`, plus the custom 'failure' /
+    'no_constraints'). This tallies them so a run records whether any QP step was
+    infeasible, failed, unbounded, or only inaccurate (a solver 'warning').
+
+    Args:
+        statuses: list of per-step status strings (None entries are ignored).
+
+    Returns:
+        dict with total_steps, per-status counts, the infeasible/failure/unbounded/
+        inaccurate step counts, and an overall `healthy` flag.
+    """
+    from collections import Counter
+    statuses = [s for s in statuses if s is not None]
+    counts = dict(Counter(statuses))
+
+    def _sum(pred):
+        return int(sum(c for s, c in counts.items() if pred(s)))
+
+    n_infeasible = _sum(lambda s: 'infeasible' in s)
+    n_failure = _sum(lambda s: s == 'failure')
+    n_unbounded = _sum(lambda s: 'unbounded' in s)
+    n_inaccurate = _sum(lambda s: s.endswith('inaccurate'))   # solver warnings
+    return {
+        'total_steps': len(statuses),
+        'status_counts': counts,
+        'num_infeasible': n_infeasible,
+        'num_failure': n_failure,
+        'num_unbounded': n_unbounded,
+        'num_inaccurate': n_inaccurate,
+        'healthy': bool(n_infeasible == 0 and n_failure == 0 and n_unbounded == 0),
+    }
 
 
 def registry_run(reg, cfg, force):

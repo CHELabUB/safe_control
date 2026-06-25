@@ -1,13 +1,24 @@
 {
   "baseline_min_h_r": -1.1008074347157653,
   "backup_min_h_r": 2.2378789850470078,
-  "hocbf_min_h_r": 1.2217982268597734,
+  "hocbf_min_h_r": 1.7852051606100794,
   "backup_peak_v": 9.0,
   "hocbf_peak_v": 9.0,
   "baseline_rear_end": true,
   "hocbf_safe": true,
   "param_mismatch": false,
   "backup_qp": {
+    "total_steps": 180,
+    "status_counts": {
+      "optimal": 180
+    },
+    "num_infeasible": 0,
+    "num_failure": 0,
+    "num_unbounded": 0,
+    "num_inaccurate": 0,
+    "healthy": true
+  },
+  "hocbf_feasibility": {
     "total_steps": 180,
     "status_counts": {
       "optimal": 180

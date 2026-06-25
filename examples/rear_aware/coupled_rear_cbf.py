@@ -64,6 +64,7 @@ class CoupledRearCBF:
                 self.rear_params_worst[k] *= self.robust_factor
         self.last_h = None
         self.last_intervened = False
+        self.last_status = 'none'
 
     def rear_accel(self, h, v_ego, v_rear, worst=False):
         """Rear's car-following acceleration at gap h, with the ego as its leader."""
@@ -96,4 +97,8 @@ class CoupledRearCBF:
         # Closest-to-nominal subject to  lo <= a <= a_acc  (a_acc wins if infeasible).
         a = min(max(u_nom, lo), self.a_acc)
         self.last_intervened = abs(a - u_nom) > 1e-3
+        # Analytic analog of QP infeasibility: the safety lower bound exceeds the
+        # actuator ceiling, so the clamped accel cannot meet it -- the ego physically
+        # cannot keep the rear gap this step.
+        self.last_status = 'infeasible' if lo > self.a_acc + 1e-9 else 'optimal'
         return float(a)

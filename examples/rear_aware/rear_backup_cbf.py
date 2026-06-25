@@ -1,26 +1,34 @@
 """
-Rear-end-avoidance Backup CBF for the ego (1D).
+Rear-end-avoidance Backup CBF for the ego, on the *augmented* rear-aware system.
 
 Mirror image of the forward CarFollowingBackupCBF1D: instead of braking to a stop
-behind a lead, the ego *accelerates to v_max* to escape an unfiltered follower
-behind it.
+behind a lead, the ego *accelerates to v_max* to escape an unfiltered follower behind
+it. Unlike the forward case (where the lead is an exogenous signal that does not enter
+the dynamics), the rear vehicle **reacts to the ego**, so it must be part of the state.
 
-  - Backup policy: u = +u_max, accelerate to v_max then hold (analytic flow; the
-    state-transition matrix mirrors brake-to-stop with t_reach in place of t_stop).
-  - Obstacle = the REAR vehicle, predicted by simulating its *assumed* car-following
-    model (OVM/IDM) against the ego's backup trajectory (the rear reacts to the ego).
-  - Barrier:  h_r(x, t) = (s_ego - L) - s_rear_pred(t) - d_min   (grad wrt ego = [+1, 0]).
-  - Terminal set: ego has reached v_max with h_r >= d_min (then h_r is non-decreasing
-    since the rear is capped at v_max, so the state is safe thereafter).
+This module therefore augments the plant to the joint state
 
-Sensitivity of the predicted h_r to the current ego state (used in the QP):
-  - 'analytic' (default): ego analytic STM with the rear prediction treated as an
-    exogenous moving obstacle (its motion enters via the explicit dh/dt term); the
-    receding horizon refreshes the prediction each step.
-  - 'coupled': finite-difference the *joint* ego+rear rollout, capturing the rear's
-    reaction to a perturbed ego state exactly.
+    x = [s_ego, v_ego, s_rear, v_rear]
 
-State x = [s, v], control u = acceleration, g(x) = [0, 1]^T.
+and folds the rear's car-following reaction a_rear(x) into the drift, giving a
+control-affine system  x_dot = f(x) + g(x) u  with the environment policy *inside* f:
+
+    f(x) = [v_ego, 0, v_rear, a_rear(x)]^T      g(x) = [0, 1, 0, 0]^T
+
+The backup flow and its sensitivity matrix S_i = d phi_i / d x0 are then produced by the
+**base BackupCBF._integrate_backup_trajectory** (rollout via robot.step + finite-difference
+of the one-step dynamics) -- a rigorous flow sensitivity, not an end-to-end barrier
+finite difference. Because the rear is in the state, the STM captures the rear reacting to
+an ego perturbation automatically.
+
+  - Backup policy: ego accelerates to v_max then holds (`_ego_backup_accel`, the hook for
+    an environment-aware escape that may depend on the rear).
+  - Barrier:  h(x) = (s_ego - L) - s_rear - d_min,  grad h = [1, 0, -1, 0]  (exact, constant).
+  - Terminal set: positive gap at the horizon (same h at phi[-1]); optional (`use_terminal`).
+
+QP (mirrors CarFollowingBackupCBF1D): for each backup step i,
+    (grad_h . S_i . g0) u  >=  -(grad_h . S_i . f0) + grad_h . f_pi_i - alpha(h_i)
+with no explicit dh/dt term -- the rear is a state now, not an exogenous obstacle.
 """
 
 import os
@@ -30,51 +38,111 @@ import numpy as np
 import cvxpy as cp
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.abspath(os.path.join(_HERE, '..', 'double_integrator')))
 sys.path.insert(0, os.path.abspath(os.path.join(_HERE, '..', 'car_following')))
 
-from backup_cbf_1d_wrapper import BackupCBF1D            # noqa: E402
-from car_following_models import nominal_accel           # noqa: E402
+from safe_control.position_control.backup_cbf_qp import BackupCBF   # noqa: E402
+from car_following_models import nominal_accel                      # noqa: E402
 
 BODY_LENGTH = 4.5
 
 
-class RearEndBackupCBF1D(BackupCBF1D):
-    """Backup CBF that accelerates the ego to v_max to avoid being rear-ended."""
+class _RearAwareAugmentedDI:
+    """Augmented 4-state plant [s_e, v_e, s_r, v_r] for the rear-aware backup CBF.
+
+    The ego is a double integrator driven by the control u (its acceleration); the rear
+    vehicle's car-following reaction a_rear(x) is folded into the drift, so the closed-loop
+    plant is control-affine  x_dot = f(x) + g(x) u  with the environment policy inside f.
+    The base BackupCBF then rolls this out and finite-differences it for the (rigorous)
+    flow sensitivity matrix.
+    """
+
+    def __init__(self, dt, rear_model, rear_params, v_max,
+                 body_length=BODY_LENGTH, robot_spec=None):
+        self.dt = float(dt)
+        self.rear_model = rear_model
+        self.rear_params = dict(rear_params or {})
+        self.v_max = float(v_max)
+        self.body_length = float(body_length)
+        self.robot_spec = robot_spec or {}
+
+    def _a_rear(self, X):
+        s_e, v_e, s_r, v_r = (float(v) for v in np.array(X).flatten())
+        ego_d = {'x': s_e, 'vx': v_e, 'length': self.body_length}
+        rear_d = {'x': s_r, 'vx': v_r, 'length': self.body_length}
+        return nominal_accel(self.rear_model, rear_d, ego_d, self.rear_params)
+
+    def f(self, X):
+        """Drift f(x) = [v_e, 0, v_r, a_rear(x)]^T  (rear policy folded in)."""
+        xf = np.array(X).flatten()
+        return np.array([[xf[1]], [0.0], [xf[3]], [self._a_rear(xf)]])
+
+    def g(self, X):
+        """Control matrix g(x) = [0, 1, 0, 0]^T (ego acceleration)."""
+        return np.array([[0.0], [1.0], [0.0], [0.0]])
+
+    def step(self, X, U):
+        """Euler step with the sim's clamps (ego v in [0, v_max], rear v >= 0)."""
+        X = np.array(X).reshape(-1, 1)
+        U = np.array(U).reshape(-1, 1)
+        Xn = (X + (self.f(X) + self.g(X) @ U) * self.dt).flatten()
+        Xn[1] = min(max(Xn[1], 0.0), self.v_max)   # ego: no reverse, capped at v_max
+        Xn[3] = max(Xn[3], 0.0)                     # rear: no reverse
+        return Xn.reshape(-1, 1)
+
+
+class RearEndBackupCBF1D(BackupCBF):
+    """Backup CBF that accelerates the ego to v_max to avoid being rear-ended.
+
+    Subclasses the base BackupCBF so the backup flow + sensitivity matrix come from the
+    framework's own `_integrate_backup_trajectory` (no bespoke rollout / no end-to-end
+    barrier finite difference). Only the augmented barrier, the escape backup control, and
+    a scalar soft QP are specialized here.
+    """
 
     def __init__(self, robot, robot_spec, dt=0.05, backup_horizon=5.0,
                  u_acc=3.0, v_max=12.0, L=4.5, d_min=1.0,
-                 rear_model='ovm', rear_params=None, sensitivity='analytic',
-                 gamma=1.0, gamma_terminal=2.0, eps_v=0.1, ax=None):
+                 rear_model='ovm', rear_params=None,
+                 gamma=1.0, gamma_terminal=2.0, use_terminal=True, ax=None):
         """
         Args:
-            robot: DoubleIntegrator1D instance.
+            robot: unused (kept for call-site compatibility); the augmented plant is
+                built internally from the params below.
             robot_spec: must contain 'u_max' (= u_acc for QP scaling/bounds).
-            backup_horizon: horizon T; should exceed (v_max - 0)/u_acc to let the
-                ego actually reach v_max within the rollout.
+            backup_horizon: horizon T; should exceed (v_max - 0)/u_acc so the ego
+                actually reaches v_max within the rollout.
             u_acc: backup acceleration magnitude (escape).
             v_max: speed the ego accelerates to.
             L, d_min: combined length and rear collision margin.
-            rear_model, rear_params: the ego's *assumed* model of the rear (may
-                differ from the rear's true params).
-            sensitivity: 'analytic' or 'coupled'.
+            rear_model, rear_params: the ego's *assumed* model of the rear (may differ
+                from the rear's true params); folded into the augmented dynamics.
+            gamma, gamma_terminal: class-K gains for the safety / terminal constraints.
+            use_terminal: include the terminal (gap-at-horizon) constraint. When False the
+                QP keeps only the per-step horizon safety constraints.
         """
-        super().__init__(
-            robot, robot_spec, dt=dt, backup_horizon=backup_horizon,
-            u_b=+abs(u_acc),
-            alpha_fn=(lambda h, g=gamma: g * h),
-            alpha_terminal_fn=(lambda h, g=gamma_terminal: g * h),
-            eps_s=0.0, eps_v=eps_v, ax=ax,
-        )
         self.u_acc = float(abs(u_acc))
         self.v_max = float(v_max)
         self.L = float(L)
         self.d_min = float(d_min)
         self.rear_model = rear_model
         self.rear_params = dict(rear_params or {})
-        self.sensitivity = sensitivity
-        self._rear0 = (0.0, 0.0)           # current rear state (s_r, v_r)
-        self._rear_s = None                # predicted rear positions over horizon
+
+        # Augmented plant with the rear policy folded into the dynamics. Use the generic
+        # f/g path in the base by keeping a non-special model key.
+        aug_spec = dict(robot_spec)
+        aug_spec.setdefault('model', 'DoubleIntegrator1D')
+        aug_robot = _RearAwareAugmentedDI(dt, self.rear_model, self.rear_params,
+                                          self.v_max, BODY_LENGTH, aug_spec)
+        super().__init__(aug_robot, aug_spec, dt=dt, backup_horizon=backup_horizon, ax=ax)
+
+        self.n_states = 4
+        self.n_controls = 1
+        self.Q_u = np.array([1.0])
+        self.alpha = float(gamma)                  # base _alpha returns alpha * h
+        self.alpha_terminal = float(gamma_terminal)
+        self.use_terminal = bool(use_terminal)
+        self.u_b = +self.u_acc                      # escape accel (QP fallback)
+        self._rear0 = (0.0, 0.0)                    # current rear state (s_r, v_r)
+        self._rear_s = None
         self._rear_v = None
         self.last_status = 'none'
 
@@ -83,177 +151,97 @@ class RearEndBackupCBF1D(BackupCBF1D):
         self._rear0 = (float(s_rear), float(v_rear))
 
     # ------------------------------------------------------------------
-    # Ego backup flow: accelerate to v_max then hold (analytic)
+    # Backup (escape) control and augmented barrier
     # ------------------------------------------------------------------
 
-    def _ego_flow(self, s0, v0):
-        a = self.u_acc
-        t = np.arange(self.N) * self.dt
-        v0 = float(v0)
-        t_reach = (self.v_max - v0) / a if (a > 0 and v0 < self.v_max) else 0.0
-        accel = t <= t_reach
-        s = np.empty(self.N)
-        v = np.empty(self.N)
-        v[accel] = v0 + a * t[accel]
-        s[accel] = s0 + v0 * t[accel] + 0.5 * a * t[accel] ** 2
-        s_reach = s0 + v0 * t_reach + 0.5 * a * t_reach ** 2
-        v[~accel] = self.v_max
-        s[~accel] = s_reach + self.v_max * (t[~accel] - t_reach)
-        return s, v, t_reach
+    def _ego_backup_accel(self, ego_d, rear_d):
+        """Ego backup acceleration, evaluated on the joint state (ego_d, rear_d).
+        CRH: Default escape policy: accelerate toward v_max then hold. 
+        """
+        return self.u_acc if ego_d['vx'] < self.v_max else 0.0
 
-    def _integrate_backup_trajectory_analytical(self, x0):
-        x0f = np.array(x0).flatten()
-        s0, v0 = float(x0f[0]), float(x0f[1])
-        s, v, t_reach = self._ego_flow(s0, v0)
-        t = np.arange(self.N) * self.dt
-        accel = t <= t_reach
+    def _h_terminal(self, x) -> float:
+        """
+        Terminal gap at the horizon (no rear-end collision).
+        CRH: This is associated with maximum acceleration to v_max. 
+        Assuming the rear is having the same limit, and initially _h_safety(x) >= 0, 
+        then _h_safety(x) should be non-decreasing.
+        This means that we could add this terminal constraints and it still works.
+        """
+        return self._h_safety(x)
 
-        phi = np.stack([s, v], axis=1)
-        S = np.zeros((self.N, 2, 2))
-        S[accel, 0, 0] = 1.0
-        S[accel, 0, 1] = t[accel]
-        S[accel, 1, 1] = 1.0
-        S[~accel, 0, 0] = 1.0
-        S[~accel, 0, 1] = t_reach          # d s / d v0 after reaching v_max
-        return phi, S
+    def _grad_h_terminal(self, x) -> np.ndarray:
+        return np.array([1.0, 0.0, -1.0, 0.0])
+
+    def _backup_control(self, x):
+        xf = np.array(x).flatten()
+        ego_d = {'x': xf[0], 'vx': xf[1], 'length': BODY_LENGTH}
+        rear_d = {'x': xf[2], 'vx': xf[3], 'length': BODY_LENGTH}
+        return np.array([self._ego_backup_accel(ego_d, rear_d)])
 
     # ------------------------------------------------------------------
-    # Rear prediction: simulate the assumed rear model against the ego flow
+    # safety requirement: 
+    # h(x) = (s_ego - L) - s_rear - d_min >= 0 no rear-end collision
     # ------------------------------------------------------------------
 
-    def _rollout_rear(self, ego_s, ego_v):
-        s_r0, v_r0 = self._rear0
-        s_r = np.empty(self.N)
-        v_r = np.empty(self.N)
-        s_r[0], v_r[0] = s_r0, v_r0
-        for i in range(self.N - 1):
-            ego_d = {'x': ego_s[i], 'vx': ego_v[i], 'length': BODY_LENGTH}
-            rear_d = {'x': s_r[i], 'vx': v_r[i], 'length': BODY_LENGTH}
-            a = nominal_accel(self.rear_model, rear_d, ego_d, self.rear_params)
-            a = max(a, -v_r[i] / self.dt)          # no reversing
-            v_r[i + 1] = max(v_r[i] + a * self.dt, 0.0)
-            s_r[i + 1] = s_r[i] + v_r[i] * self.dt
-        return s_r, v_r
+    def _h_safety(self, x, t: float = 0.0) -> float:
+        xf = np.array(x).flatten()
+        return (xf[0] - self.L) - xf[2] - self.d_min
 
-    def _rear_s_at(self, t):
-        i = int(round(t / self.dt))
-        i = min(max(i, 0), self.N - 1)
-        return self._rear_s[i]
+    def _grad_h_safety(self, x, t: float = 0.0) -> np.ndarray:
+        return np.array([1.0, 0.0, -1.0, 0.0])
 
     # ------------------------------------------------------------------
-    # Barriers (use the stored rear prediction self._rear_s)
-    # ------------------------------------------------------------------
-
-    def _h_safety(self, x, t=0.0):
-        s_ego = float(np.array(x).flatten()[0])
-        return (s_ego - self.L) - self._rear_s_at(t) - self.d_min
-
-    def _grad_h_safety(self, x, t=0.0):
-        return np.array([1.0, 0.0])
-
-    def _h_terminal_t(self, x, t):
-        # Gap at the horizon. By construction the ego is at v_max there (T exceeds
-        # the time to reach v_max), and the rear is capped at v_max, so h_r is
-        # non-decreasing beyond T -> a positive gap is invariant. A rigid "must be
-        # at v_max" term is intentionally omitted: it would fight the braking
-        # nominal once the rear is far away and make the control chatter.
-        s_ego = float(np.array(x).flatten()[0])
-        return (s_ego - self.L) - self._rear_s_at(t) - self.d_min
-
-    def _h_terminal(self, x):
-        return self._h_terminal_t(x, (self.N - 1) * self.dt)
-
-    def _grad_h_terminal(self, x):
-        return np.array([1.0, 0.0])
-
-    # ------------------------------------------------------------------
-    # Coupled finite-difference: h_r(t_i) as a function of ego (s0, v0)
-    # ------------------------------------------------------------------
-
-    def _joint_h(self, s0, v0):
-        """h_r over the horizon for ego initial (s0, v0), joint ego+rear rollout."""
-        ego_s, ego_v, _ = self._ego_flow(s0, v0)
-        s_r, _ = self._rollout_rear(ego_s, ego_v)
-        return (ego_s - self.L) - s_r - self.d_min
-
-    # ------------------------------------------------------------------
-    # QP (soft-constrained; mirrors CarFollowingBackupCBF1D)
+    # QP (soft-constrained scalar; mirrors CarFollowingBackupCBF1D) using the
+    # base-class backup flow + sensitivity matrix.
     # ------------------------------------------------------------------
 
     def solve_control_problem(self, robot_state, friction=None):
-        x0 = np.array(robot_state).flatten()
-        s0, v0 = float(x0[0]), float(x0[1])
+        xf = np.array(robot_state).flatten()
+        # Assemble the augmented initial state from the ego state + stored rear state.
+        x0 = np.array([xf[0], xf[1], self._rear0[0], self._rear0[1]])
 
+        # Rigorous flow + sensitivity from the base class (rollout via robot.step,
+        # STM via finite-difference of the one-step augmented dynamics).
         phi, S = self._integrate_backup_trajectory(x0)
-        # Predict the rear against the ego backup trajectory; store for barriers.
-        self._rear_s, self._rear_v = self._rollout_rear(phi[:, 0], phi[:, 1])
+        self._rear_s, self._rear_v = phi[:, 2], phi[:, 3]
 
-        h_vals = [self._h_safety(phi[i], i * self.dt) for i in range(self.N)]
+        h_vals = [self._h_safety(phi[i]) for i in range(self.N)]
         self._last_h_min = min(float(np.min(h_vals)), self._h_terminal(phi[-1]))
-        self.latest_backup_trajectory = phi.copy()
+        if self._last_h_min < self.global_min_h:
+            self.global_min_h = self._last_h_min
+        self.latest_backup_trajectory = phi[:, :2].copy()
         self.curr_step += 1
 
         u_nom = self._get_nominal_control(x0)
         u_max = self.robot_spec.get('u_max', 1.0)
         u_nom = float(np.clip(u_nom, -u_max, u_max).flat[0])
 
-        f0 = self._dynamics_f(x0)
-        g0 = self._dynamics_g(x0)
+        f0 = self._dynamics_f(x0)              # (4,)  drift incl. rear reaction
+        g0 = self._dynamics_g(x0)              # (4, 1)
+        grad_h = self._grad_h_safety(phi[0])   # constant [1, 0, -1, 0]
 
         coeffs, rhs_vals = [], []
+        for i in range(1, self.N):
+            x_i, S_i = phi[i], S[i]
+            h_val = self._h_safety(x_i)
+            if i < self.N - 1:
+                f_pi = (phi[i + 1] - phi[i]) / self.dt
+            else:
+                f_pi = (phi[i] - phi[i - 1]) / self.dt
+            c = float(grad_h @ S_i @ g0)
+            r = float(-(grad_h @ S_i @ f0) + (grad_h @ f_pi) - self._alpha(h_val))
+            if abs(c) > 1e-6:
+                coeffs.append(c)
+                rhs_vals.append(r)
 
-        if self.sensitivity == 'coupled':
-            # Same constraint as 'analytic', but the sensitivity of h_r(t_i) to the
-            # current ego state is the *joint* finite difference (captures the rear
-            # reacting to a perturbed ego) instead of the ego-only STM.
-            d = 1e-3
-            h0 = self._joint_h(s0, v0)
-            dh_ds = (self._joint_h(s0 + d, v0) - h0) / d
-            dh_dv = (self._joint_h(s0, v0 + d) - h0) / d
-            for i in range(1, self.N):
-                if i < self.N - 1:
-                    f_pi = (phi[i + 1] - phi[i]) / self.dt
-                else:
-                    f_pi = (phi[i] - phi[i - 1]) / self.dt
-                v_ego_i = float(f_pi[0])                       # grad_h_local . f_pi
-                dh_dt = (self._h_safety(phi[i], i * self.dt + self.dt)
-                         - self._h_safety(phi[i], i * self.dt)) / self.dt
-                c = float(dh_dv[i])
-                r = float(-dh_ds[i] * v0 + v_ego_i - dh_dt - self._alpha(h0[i]))
-                if abs(c) > 1e-6:
-                    coeffs.append(c)
-                    rhs_vals.append(r)
-            # terminal: gap at horizon (ego is already at v_max there by construction)
-            hT = float(h0[-1])
-            c_T = float(dh_dv[-1])
-            dhT_dt = (self._h_safety(phi[-1], (self.N - 1) * self.dt + self.dt)
-                      - self._h_safety(phi[-1], (self.N - 1) * self.dt)) / self.dt
-            r_T = float(-dh_ds[-1] * v0 - dhT_dt - self._alpha_terminal(hT))
-            has_terminal = abs(c_T) > 1e-6
-        else:
-            # Analytic: ego STM, rear exogenous (its motion via explicit dh/dt).
-            for i in range(1, self.N):
-                x_i, S_i, t_i = phi[i], S[i], i * self.dt
-                h_val = self._h_safety(x_i, t_i)
-                grad_h = self._grad_h_safety(x_i, t_i)
-                dh_dt = (self._h_safety(x_i, t_i + self.dt) - h_val) / self.dt
-                if i < self.N - 1:
-                    f_pi = (phi[i + 1] - phi[i]) / self.dt
-                else:
-                    f_pi = (phi[i] - phi[i - 1]) / self.dt
-                c = float((grad_h @ S_i @ g0).flat[0])
-                r = float(-(grad_h @ S_i @ f0) + (grad_h @ f_pi) - dh_dt
-                          - self._alpha(h_val))
-                if abs(c) > 1e-6:
-                    coeffs.append(c)
-                    rhs_vals.append(r)
-            x_T, S_T, t_T = phi[-1], S[-1], (self.N - 1) * self.dt
-            hT = self._h_terminal_t(x_T, t_T)
-            grad_hT = self._grad_h_terminal(x_T)
-            dhT_dt = (self._h_terminal_t(x_T, t_T + self.dt) - hT) / self.dt
-            c_T = float((grad_hT @ S_T @ g0).flat[0])
-            r_T = float(-(grad_hT @ S_T @ f0) - dhT_dt - self._alpha_terminal(hT))
-            has_terminal = abs(c_T) > 1e-6
+        # Terminal: gap at the horizon (no f_pi drift term, no exogenous dh/dt).
+        x_T, S_T = phi[-1], S[-1]
+        hT = self._h_terminal(x_T)
+        grad_hT = self._grad_h_terminal(x_T)
+        c_T = float(grad_hT @ S_T @ g0)
+        r_T = float(-(grad_hT @ S_T @ f0) - self._alpha_terminal(hT))
+        has_terminal = self.use_terminal and abs(c_T) > 1e-6
 
         RHO_SAFE, RHO_TERM = 1e4, 1e1
         status = 'no_constraints'

@@ -1,7 +1,8 @@
 {
   "scenario": "ego_rear",
   "ego_model": "ovm",
-  "sensitivity": "analytic",
+  "ego_target": "speed",
+  "v_desired": 1.0,
   "s_ego0": 0.0,
   "v_ego0": 9.0,
   "gap_r0": 3.0,
@@ -11,6 +12,8 @@
   "v_max": 15.0,
   "v_road": 12.0,
   "gamma": 1.0,
+  "gamma_terminal": 2.0,
+  "backup_terminal": false,
   "backup_horizon": 5.0,
   "hocbf_a1": 1.0,
   "hocbf_a2": 1.0,
