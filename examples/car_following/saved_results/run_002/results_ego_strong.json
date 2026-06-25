@@ -1,0 +1,37 @@
+{
+  "scenario": "ego_strong",
+  "description": "ego brakes stronger than lead (a_e > a_l)",
+  "inputs_ref": "config.json (run-level)",
+  "derived": {
+    "s_ego0": 12.5,
+    "n_sim": 240,
+    "smooth_fit_max_error": 0.6321,
+    "smooth_fit_offset": 0.4509
+  },
+  "results": {
+    "nominal": {
+      "min_gap": 1.7063445358572835,
+      "min_b": 0.6016916387099611,
+      "min_v": 0.0,
+      "max_abs_du": 1.191082966499848,
+      "collision": false,
+      "n_inaccurate_qp": 0
+    },
+    "cbf": {
+      "min_gap": 1.7063459952656785,
+      "min_b": 0.602791673359889,
+      "min_v": 0.0,
+      "max_abs_du": 1.1542048731845993,
+      "collision": false,
+      "n_inaccurate_qp": 0
+    },
+    "backup": {
+      "min_gap": 2.084912579895814,
+      "min_b": 0.6370759554729366,
+      "min_v": 0.08554085650951064,
+      "max_abs_du": 0.39841855135247606,
+      "collision": false,
+      "n_inaccurate_qp": 3
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "scenario": "ego_weak",
+  "description": "ego brakes weaker than lead (a_e < a_l)",
+  "inputs_ref": "config.json (run-level)",
+  "derived": {
+    "s_ego0": 5.5,
+    "n_sim": 240,
+    "smooth_fit_max_error": 1.9351,
+    "smooth_fit_offset": 1.9351
+  },
+  "results": {
+    "nominal": {
+      "min_gap": -2.0606698117874345,
+      "min_b": -2.9846357011190996,
+      "min_v": 0.8131333203454493,
+      "max_abs_du": 0.14466271574292167,
+      "collision": true,
+      "n_inaccurate_qp": 0
+    },
+    "cbf": {
+      "min_gap": 0.6535773167136938,
+      "min_b": 0.026876305191589123,
+      "min_v": 0.5715376914729191,
+      "max_abs_du": 0.1345673309734281,
+      "collision": false,
+      "n_inaccurate_qp": 0
+    },
+    "backup": {
+      "min_gap": 2.0367178848215275,
+      "min_b": 0.8973571420448465,
+      "min_v": 0.036836754461699865,
+      "max_abs_du": 1.6360228620386643,
+      "collision": false,
+      "n_inaccurate_qp": 0
+    }
+  }
+}

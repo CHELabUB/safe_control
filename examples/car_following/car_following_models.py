@@ -10,7 +10,7 @@ Provided functions
 ------------------
   ovm_accel(follower, leader, params)  -> float
       Optimal Velocity Model (OVM) acceleration.
-  leader_accel(model, follower, leader, params) -> float
+  nominal_accel(model, follower, leader, params) -> float
       Dispatch to 'ovm' (ovm_accel) or 'idm' (reuses _idm_accel), clipped to a_max.
   lead_velocity(t, params) -> float
       Scripted stop-and-go velocity profile for the lead car.
@@ -58,7 +58,7 @@ def ovm_accel(follower: dict, leader: dict, params: dict) -> float:
     return alpha * (V_h - v) + beta * (W - v)
 
 
-def leader_accel(model: str, follower: dict, leader: dict, params: dict) -> float:
+def nominal_accel(model: str, follower: dict, leader: dict, params: dict) -> float:
     """Nominal car-following acceleration, dispatched by model name.
 
     Used as the ego's nominal controller (follower=ego, leader=lead car) and is
@@ -67,10 +67,14 @@ def leader_accel(model: str, follower: dict, leader: dict, params: dict) -> floa
     Args:
         model: 'ovm' (OVM) or 'idm' (reuses safe_control _idm_accel).
         follower, leader: car dicts as above.
-        params: model parameters; must include 'a_max' for clipping.
+        params: model parameters; 'a_max' (max acceleration a_bar) and, if present,
+                'a_e' (max deceleration) set the actuator limits.
 
     Returns:
-        Acceleration clipped to +/- a_max [m/s^2].
+        Acceleration clipped to the actuator limits [-a_e, a_max].  The braking
+        bound matches the vehicle's real capability a_e (default = a_max), so an
+        unfiltered collision reflects the model's sluggish *response*, not an
+        artificially low brake cap.
     """
     if model == 'ovm':
         a = ovm_accel(follower, leader, params)
@@ -79,8 +83,9 @@ def leader_accel(model: str, follower: dict, leader: dict, params: dict) -> floa
     else:
         raise ValueError(f"Unknown nominal model '{model}' (expected 'ovm' or 'idm')")
 
-    a_max = float(params.get('a_max', 3.0))
-    return float(np.clip(a, -a_max, a_max))
+    a_accel = float(params.get('a_max', 3.0))
+    a_brake = float(params.get('a_e', a_accel))
+    return float(np.clip(a, -a_brake, a_accel))
 
 
 def lead_velocity(t: float, params: dict) -> float:
