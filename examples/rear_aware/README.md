@@ -56,19 +56,22 @@ unfiltered baseline safe). Works for both `--ego-model ovm|idm`.
 | controller | result | behavior |
 |---|---|---|
 | baseline (no filter) | `min h_r < 0` REAR-END | stops, is hit |
-| backup CBF | `min h_r > 0` safe | **floors it, abandons the stop** |
-| **coupled HOCBF** | `min h_r = d_min` safe | **brakes gently, rides the boundary** |
+| backup CBF | `min h_r >= d_min` (sim-safe) | **floors it, abandons the stop** — guarantee is interaction-inconsistent |
+| coupled HOCBF | `min h_r >= d_min` (sim-safe) | **brakes gently, rides the boundary** — no formal proof under input constraints |
 
-### Why a backup CBF is the wrong tool here
+### Backup CBF (`--method bcbf`)
+The backup CBF works in simulation: it keeps `min h_r >= d_min` and the QP is
+consistently feasible. The issue is a **soundness gap**, not a mechanical failure.
 A backup CBF guarantees "from here, if I commit to the backup maneuver, I stay
 safe." That holds for a *passive* obstacle, but the rear is **interactive** — it
 reacts to what the ego actually does. The backup rollout assumes the rear reacts to
 the ego's *escape*, but the ego applies the *filtered* (near-nominal) control, so
-the rear reacts to that instead. The guarantee rests on a reaction the human never
+the rear reacts to that instead. The guarantee rests on a reaction the rear never
 sees. It also forces an over-aggressive escape (accelerate to `v_max`, abandoning
-the stop). It is kept in the example (`--methods bcbf`) only as a contrast.
+the stop). Kept as a contrast: it illustrates what guarantee-consistent behavior
+looks like when the soundness assumption happens to hold approximately.
 
-### Coupled HOCBF (the principled approach)
+### Coupled HOCBF (`--method hocbf`)
 Model the rear **in the closed loop**: joint state `[h_r, v_ego, v_rear]` with the
 rear's reaction `v̇_rear = a_r(x)` part of the dynamics, and constrain the *applied*
 ego acceleration. `b = h_r - d_min` has relative degree 2, so a high-order CBF gives
@@ -80,6 +83,14 @@ a >= a_r(x) - (alpha1 + alpha2)(v_ego - v_rear) - alpha1*alpha2*(h_r - d_min)
 interaction-consistent. The ego simply **limits its braking** so the rear can keep
 pace — it rides `h_r = d_min` and still stops (a little past the target), rather
 than escaping. No rollout, no QP. Gains `--hocbf-a1`, `--hocbf-a2`.
+
+**Caveat:** this is not a formally verified CBF. Standard HOCBF validity requires
+that the input constraint set (`a ∈ [a_min, a_max]`) is compatible with the
+lower-bound condition everywhere on `{b >= 0}`. When the required lower bound
+exceeds `a_max` (reported as `'infeasible'` in `results.json`), the condition cannot
+be met and safety is not guaranteed by the theory. In practice the constraint is
+rarely active at its limit, but no formal proof of forward invariance under input
+saturation has been established here.
 
 ### Robustness to rear-model mismatch (`--hocbf-robust-factor`)
 The HOCBF uses the ego's *assumed* rear model; the actual rear may be less
@@ -192,17 +203,25 @@ of these scripts to write the results (figures, configs, `register.csv`) somewhe
 than the default `<example>/output`.
 
 ## Known limitations / TODO
+- **HOCBF validity under input constraints.** The coupled HOCBF lower-bound condition
+  is not always satisfiable when `a_min` is bounded (vehicle cannot decelerate
+  arbitrarily hard). When the required lower bound exceeds the acceleration limit,
+  the filter saturates and formal safety is not guaranteed. Infeasible steps are
+  counted in `results.json`. A formally valid approach would require verifying
+  compatibility of the input set with the HOCBF condition on all of `{b >= 0}`.
 - **HOCBF needs a rear model.** The coupled HOCBF assumes a (bounded) model of the
   rear's reaction. `--hocbf-robust-factor` hedges against under-responsiveness, but a
   fully adversarial tailgater cannot be guaranteed against by any ego controller —
   an RSS-style "not at fault" framing is the honest fallback there.
+- **Backup CBF (interaction-inconsistent guarantee).** Works in simulation (keeps
+  `min h_r >= d_min`, QP consistently feasible), but the safety guarantee is
+  interaction-inconsistent: it assumes the rear reacts to the ego's escape while the
+  ego actually applies the filtered control. Also has a `v_max`-saturation chatter
+  degeneracy worked around by keeping the escape `v_max` above road speed.
 - **Combined front + rear.** The end goal is the ego *between* a lead and a follower,
   enforcing `h_f >= 0` and `h_r >= 0` together (they conflict: forward safety wants
   braking, rear safety wants gentle braking / pulling away). These scenarios are the
   building blocks; combining the forward CBF with the coupled rear HOCBF is next.
-- **Backup CBF (contrast only).** Kept to illustrate the soundness problem; it also
-  has a `v_max`-saturation chatter degeneracy worked around by keeping the escape
-  `v_max` above the road speed. Not recommended for the interactive rear.
 
 ## Files
 | File | Role |
