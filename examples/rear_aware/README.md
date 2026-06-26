@@ -129,6 +129,80 @@ ego_rear **drops it by default** (`--no-backup-terminal`); pass
 `--backup-terminal` to restore it. The `RearEndBackupCBF1D(use_terminal=...)` class
 default keeps the terminal.
 
+### Interaction-model accuracy matters (preliminary study)
+
+How much does the **accuracy** of the ego's assumed rear-following model matter to the backup
+CBF? Using target-speed mode (ego eases `9 → 1` m/s; actual rear OVM `α=0.4, β=0.3`), we sweep
+the *assumed* rear responsiveness as a scale of the actual gains — `passive (0)` → `under (<1)`
+→ `accurate (1)` → `over (>1)` — and measure both safety (`min h_r`) and performance.
+
+Two findings:
+
+1. **Safety is structurally robust to mismatch.** Every filtered run stays safe
+   (`min h_r ≈ 2.1–2.6 ≫ d_min`) for *every* assumed model — even 2× over-estimation. With no
+   lead, the ego always retains a **forward escape** (accelerate to `v_max > v_road`), so
+   over-trusting the rear's braking never causes a collision: the QP re-solves each step and
+   falls back on the escape. **Over-estimation is not punished here.**
+2. **Mismatch shows up as performance, not a safety cliff.** A conservative assumption
+   (passive / under-responsive) makes the ego hold more speed — it settles to `v_desired`
+   slowly or never, with a larger steady offset and much heavier filter intervention. A more
+   accurate / responsive assumption settles faster and overrides the driver less.
+
+| assumed (scale) | `min h_r` | `t_settle` [s] | `v_offset` | intervention | outcome |
+|---|---|---|---|---|---|
+| baseline (no filter) | **−1.61** | 3.6 | 0.0 | 0 | **rear-end** |
+| passive (0) | 2.58 | never | 0.58 | 23.0 | safe, poor perf |
+| under (0.5) | 2.39 | 13.3 | 0.40 | 17.2 | safe |
+| accurate (1.0) | 2.27 | 10.2 | 0.27 | 13.7 | safe |
+| over (2.0) | 2.11 | 8.2 | 0.11 | 9.6 | safe |
+
+(`t_settle` to `|v−v_desired| ≤ 0.5`; `v_offset = v_final − v_desired`; intervention `= ∫|u−u_nom| dt`.
+The actual and assumed `α, β` are logged per run in `register.csv`.)
+
+**Takeaway.** The no-lead `ego_rear` scenario demonstrates three of the four interaction
+regimes — *no safety → crash; conservative model → safe but poor task performance; accurate
+model → best performance* — but **not** "over-estimate → collision", because the forward escape
+is always available. Punishing over-estimation needs the ego **sandwiched** by a lead in front
+(the combined three-car scenario; see *Combined front + rear* below).
+
+**Reproduce** (the sweeps default to gitignored `temp_<scenario>/` folders; the saved copies
+under `saved_results/` were produced by these same commands and then moved):
+```bash
+# 1. find a non-degenerate operating point (baseline crashes, accurate settles);
+#    sweeps ego_v0 x v_desired x v_max  ->  temp_v_regime/sweep_v_regime.csv
+uv run python examples/rear_aware/sweep_rear_aware.py --scenario v_regime
+
+# 2. at the chosen operating point, sweep the assumed/actual responsiveness scale (+ perf
+#    metrics)  ->  temp_interaction_accuracy/sweep_interaction_accuracy.csv
+uv run python examples/rear_aware/sweep_rear_aware.py --scenario interaction_accuracy
+
+# 3. statistics figure (safety flat; t_settle / v_offset / intervention degrade)
+uv run python examples/rear_aware/plot_accuracy_sweep.py \
+    examples/rear_aware/temp_interaction_accuracy/sweep_interaction_accuracy.csv
+
+# 4. the five representative full runs (one --method per invocation) into temp_representative/
+#    operating point: ego eases 9 -> 1 m/s, actual rear OVM alpha=0.4 beta=0.3
+COMMON="--tf 25 --ego-v0 9 --v-desired 1.0 --v-max 14 --v-road 12 --gap-r0 3 --d-min 1 \
+        --u-acc 3 --rear-alpha 0.4 --rear-beta 0.3 --output-dir examples/rear_aware/temp_representative"
+uv run python examples/rear_aware/run_ego_rear.py --method baseline $COMMON                                       # run_001
+uv run python examples/rear_aware/run_ego_rear.py --method bcbf --assumed-rear-alpha 0.0 --assumed-rear-beta 0.0  $COMMON  # passive  run_002
+uv run python examples/rear_aware/run_ego_rear.py --method bcbf --assumed-rear-alpha 0.2 --assumed-rear-beta 0.15 $COMMON  # under    run_003
+uv run python examples/rear_aware/run_ego_rear.py --method bcbf                                                   $COMMON  # accurate run_004
+uv run python examples/rear_aware/run_ego_rear.py --method bcbf --assumed-rear-alpha 0.8 --assumed-rear-beta 0.6  $COMMON  # over     run_005
+
+# 5. behavior overlay from a JSON spec listing those five run folders (see
+#    saved_results/ego_rear_interactive_compare/compare_spec.json for the exact spec)
+uv run python examples/rear_aware/plot_runs.py examples/rear_aware/temp_representative/compare_spec.json
+```
+
+**Saved results:**
+- [`saved_results/ego_rear_interaction_accuracy_stats/`](saved_results/ego_rear_interaction_accuracy_stats/)
+  — sweep CSV + statistics figure `accuracy_sweep.png` (safety flat & safe; `t_settle` /
+  `v_offset` / intervention degrade as the assumed model gets more conservative).
+- [`saved_results/ego_rear_interactive_compare/`](saved_results/ego_rear_interactive_compare/)
+  — five representative runs (`baseline`, `passive`, `under`, `accurate`, `over`) with the
+  behavior overlay `compare_runs.png` and the `compare_spec.json` that produced it.
+
 ## Running individual methods, saved data, and comparison plots
 
 `run_ego_rear.py` runs **one** controller per invocation, chosen with `--method`
@@ -176,7 +250,8 @@ a left column of three time series (rear gap `h_r` with `h_r=0`/`d_min` dashed; 
 with the target speed dashed; ego acceleration as solid actual + thin dashed nominal in the
 same colour) and a right-hand **phase portrait** (ego speed `v` on the y-axis vs rear gap
 `h_r` on the x-axis) overlaying the desired-speed line, vertical `h=0` and `h=d_min` lines
-with the unsafe `h<d_min` region shaded red, and the rear's OVM and IDM range-policy curves. Reference values (`d_min`, target speed, rear params)
+with the unsafe `h<d_min` region shaded red, and the rear's range-policy curve (OVM or IDM,
+whichever the rear model in use is). Reference values (`d_min`, target speed, rear params)
 are read from the first run's `config.json`. The output path is the spec's `output`,
 overridden by `--output` when supplied, else `<spec_dir>/compare_runs.png`.
 
@@ -193,7 +268,11 @@ CSV to `output/sweep_<scenario>.csv`.
 ```bash
 uv run python examples/rear_aware/sweep_rear_aware.py --scenario three_car   # cases that rear-end
 uv run python examples/rear_aware/sweep_rear_aware.py --scenario ego_rear     # cases the filter saves
+uv run python examples/rear_aware/sweep_rear_aware.py --scenario v_regime              # find an operating point (ego_v0 x v_desired x v_max)
+uv run python examples/rear_aware/sweep_rear_aware.py --scenario interaction_accuracy  # assumed-vs-actual rear responsiveness (+ perf metrics)
 ```
+The `v_regime` and `interaction_accuracy` sweeps back the *interaction-model accuracy* study
+above; they default their output to a gitignored `temp_<scenario>/` folder.
 Render a chosen case with the matching `run_three_car.py` / `run_ego_rear.py`
 flags; each run is a registry entry under `output/run_NNN/` (dedup by config; see
 `examples/README.md`). On a config that already exists, `--force` recomputes it into a
@@ -229,6 +308,7 @@ than the default `<example>/output`.
 | `run_three_car.py` | Scenario 1 (three-car): simulation, figure, registry, saved series |
 | `run_ego_rear.py` | Scenario 2 (ego + rear): one `--method` (baseline/bcbf/hocbf) per run, figure, registry, saved series |
 | `plot_runs.py` | independent comparison plotter (overlay saved runs via a JSON spec) |
+| `plot_accuracy_sweep.py` | statistics plotter for the `interaction_accuracy` sweep CSV |
 | `compare_spec.example.json` | example spec for `plot_runs.py` |
 | `rear_aware_common.py` | shared constants, matplotlib, registry/figure + series save/load helpers |
 | `coupled_rear_cbf.py` | `CoupledRearCBF` — interaction-consistent HOCBF (recommended) |

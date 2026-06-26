@@ -360,12 +360,17 @@ def main():
         parts.append(f"mismatch={mismatch}")
     footnote = ' '.join(parts)
     make_figure(method, out, cfg, t_state, t_ctrl, run.path, footnote)
+    ra = cfg.get('rear_assumed', {})              # assumed model (filters only)
     reg.commit(run, columns={'scenario': 'ego_rear', 'method': method,
                              'ego_model': cfg['ego_model'],
                              'ego_target': cfg['ego_target'],
                              'v_desired': cfg.get('v_desired', ''),
+                             'v_max': cfg['v_max'],
                              'rear_model': cfg['rear_model'],
                              'assumed_rear_model': cfg.get('rear_assumed_model', ''),
+                             'rear_alpha': rp['alpha'], 'rear_beta': rp['beta'],
+                             'assumed_rear_alpha': ra.get('alpha', ''),
+                             'assumed_rear_beta': ra.get('beta', ''),
                              'rear_kappa': rp['kappa'], 'rear_a_decel': rp['a_e'],
                              'gap_r0': cfg['gap_r0'], 'mismatch': mismatch,
                              'note': args.note})

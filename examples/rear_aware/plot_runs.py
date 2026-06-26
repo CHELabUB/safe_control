@@ -32,7 +32,8 @@ Layout (left column = time series, right = phase portrait):
     panel 2 (mid-left)    ego velocity vs time      + dashed target speed
     panel 3 (bot-left)    ego acceleration vs time  (solid=actual, thin dashed=nominal)
     phase  (right)        ego speed v vs rear gap h_r  + desired-speed line, h=0, h=d_min
-                          (h<d_min shaded red) and the OVM & IDM range-policy curves
+                          (h<d_min shaded red) and the rear's range-policy curve
+                          (OVM or IDM, whichever the rear model in use is)
 
 Reference values (d_min, target speed, rear params for the policy curves) are read from
 the first run's config.json. Usage:
@@ -177,6 +178,7 @@ def main():
     d_min = ref_cfg.get('d_min')
     v_des = ref_cfg.get('v_desired')                # None in stop mode
     rear = ref_cfg.get('rear_actual', {})
+    rear_model = ref_cfg.get('rear_model', 'ovm')   # only the model in use is drawn
 
     # Report how the runs' configs differ (read straight from config.json, which records
     # the full pruned config -- register.csv only keeps a few key columns).
@@ -225,11 +227,13 @@ def main():
     # safety-violation region (h < d_min) shaded red
     if d_min is not None:
         ax_ph.axvspan(h_lo, d_min, color='red', alpha=0.12, label='unsafe (h < d_min)')
-    # range-policy curves: OVM and IDM (rear params from the reference config)
-    if rear:
+    # range-policy curve for the rear model actually in use (rear params from the
+    # reference config); only one of OVM / IDM is drawn.
+    if rear and rear_model == 'ovm':
         h_grid = np.linspace(max(h_lo, 0.0), h_hi, 240)
         ax_ph.plot(h_grid, ovm_policy_v(rear, h_grid), color='black', ls='--', lw=1.4,
                    label='OVM range policy')
+    elif rear and rear_model == 'idm':
         v_grid = np.linspace(0.0, rear.get('v0', v_hi) * 0.999, 240)
         h_idm = idm_policy_h(rear, v_grid)
         m = h_idm <= h_hi

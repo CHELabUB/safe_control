@@ -1,0 +1,10 @@
+{
+  "output": "saved_results/ego_rear_interactive_compare/compare_runs.png",
+  "runs": {
+    "baseline (no filter)": "saved_results/ego_rear_interactive_compare/run_001",
+    "passive (assumed 0/0)": "saved_results/ego_rear_interactive_compare/run_002",
+    "under (assumed 0.2/0.15)": "saved_results/ego_rear_interactive_compare/run_003",
+    "accurate (assumed=actual 0.4/0.3)": "saved_results/ego_rear_interactive_compare/run_004",
+    "over (assumed 0.8/0.6)": "saved_results/ego_rear_interactive_compare/run_005"
+  }
+}

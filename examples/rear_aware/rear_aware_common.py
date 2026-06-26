@@ -34,9 +34,12 @@ L_COMBINED = BODY_LENGTH
 
 # Register columns (superset across scenarios) so both scripts write a consistent
 # header into a shared register.csv; unused fields are left blank per row.
+# The (actual vs assumed) alpha/beta columns make the interaction-model mismatch the
+# register's first-class varying axis (see the interaction_accuracy sweep).
 REGISTER_COLUMNS = ['scenario', 'method', 'ego_model', 'ego_target', 'v_desired',
-                    'rear_model', 'assumed_rear_model', 'rear_kappa', 'rear_a_decel',
-                    'gap_r0', 'mismatch', 'note']
+                    'v_max', 'rear_model', 'assumed_rear_model',
+                    'rear_alpha', 'rear_beta', 'assumed_rear_alpha', 'assumed_rear_beta',
+                    'rear_kappa', 'rear_a_decel', 'gap_r0', 'mismatch', 'note']
 
 
 def resolve(val, default):
