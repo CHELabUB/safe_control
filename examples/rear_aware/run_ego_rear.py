@@ -2,19 +2,21 @@
 Scenario 2 (ego + rear): interaction-aware rear-end avoidance.
 
 The ego's nominal brings it to a stop at a target (OVM vs a virtual wall); a rear
-OVM follower (no filter) is behind it. The ego is simulated three ways and overlaid:
+OVM follower (no filter) is behind it. One controller is run per invocation, selected
+with --method:
 
   baseline    : nominal only          -> rear-ended (h_r < 0)
-  backup CBF  : accelerate-to-escape  -> safe but over-aggressive (abandons the stop)
+  bcbf        : accelerate-to-escape   -> safe but over-aggressive (abandons the stop)
                 [contrast only -- unsound for an interactive rear, see README]
-  HOCBF       : coupled high-order CBF -> safe and graceful (brakes gently, rides h_r=d_min)
+  hocbf       : coupled high-order CBF -> safe and graceful (brakes gently, rides h_r=d_min)
 
 The HOCBF models the rear *in the closed loop* and constrains the applied ego
-acceleration, so the rear's reaction matches what it actually sees.
+acceleration, so the rear's reaction matches what it actually sees. Each run saves its
+time-series (series_<method>.npz); overlay several with plot_runs.py.
 
 Usage:
-    uv run python examples/rear_aware/run_ego_rear.py
-    uv run python examples/rear_aware/run_ego_rear.py --hocbf-robust-factor 0.5 \
+    uv run python examples/rear_aware/run_ego_rear.py --method hocbf
+    uv run python examples/rear_aware/run_ego_rear.py --method hocbf --hocbf-robust-factor 0.5 \
         --rear-alpha 0.3 --rear-beta 0.3 --assumed-rear-alpha 0.6 --assumed-rear-beta 0.4
 """
 
@@ -25,18 +27,27 @@ import argparse
 import numpy as np
 
 from rear_aware_common import (plt, LW, BODY_LENGTH, L_COMBINED, REGISTER_COLUMNS,
-                               resolve, registry_run, save_figure, qp_solver_stats, _HERE)
+                               resolve, registry_run, save_figure, save_run_series,
+                               qp_solver_stats, _HERE)
 from double_integrator_1d import DoubleIntegrator1D                # noqa: E402
 from rear_aware_models import rear_accel, ego_stop_nominal, ego_speed_nominal  # noqa: E402
 from rear_backup_cbf import RearEndBackupCBF1D                     # noqa: E402
 from coupled_rear_cbf import CoupledRearCBF                        # noqa: E402
 from run_registry import RunRegistry                               # noqa: E402
 
+# Selectable controllers, with display label / colour / the results.json key prefix
+# (kept stable: bcbf -> 'backup'). One method is run per invocation.
+METHODS = ['baseline', 'bcbf', 'hocbf']
+METHOD_STYLE = {'baseline': ('baseline', 'tab:red'),
+                'bcbf': ('backup CBF', 'tab:green'),
+                'hocbf': ('HOCBF (coupled)', 'tab:blue')}
+RESULT_KEY = {'baseline': 'baseline', 'bcbf': 'backup', 'hocbf': 'hocbf'}
+
 
 def simulate_ego_rear(cfg, dt, n_sim, mode):
     """Ego (OVM-to-stop nominal) + rear (OVM follower, no filter).
 
-    mode in {'baseline', 'cbf' (backup), 'hocbf' (coupled)}.
+    mode in {'baseline', 'bcbf' (backup CBF), 'hocbf' (coupled)}.
     """
     L = L_COMBINED
     u_acc, v_max, v_road = cfg['u_acc'], cfg['v_max'], cfg['v_road']
@@ -46,7 +57,7 @@ def simulate_ego_rear(cfg, dt, n_sim, mode):
     rear = DoubleIntegrator1D(dt, dict(rspec))
 
     cbf = None
-    if mode == 'cbf':
+    if mode == 'bcbf':
         cbf = RearEndBackupCBF1D(
             ego, dict(rspec), dt=dt, backup_horizon=cfg['backup_horizon'],
             u_acc=u_acc, v_max=v_max, L=L, d_min=cfg['d_min'],
@@ -115,55 +126,52 @@ def simulate_ego_rear(cfg, dt, n_sim, mode):
     return out
 
 
-def make_figure(base, backup, hocbf, cfg, t_state, t_ctrl, save_dir, footnote):
+def make_figure(method, out, cfg, t_state, t_ctrl, save_dir, footnote):
+    """Plot the single method's run (ego solid, rear dashed)."""
     fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
     axp, axg, axv, axu = axes
     speed_mode = cfg['ego_target'] == 'speed'
-    series = [('baseline', base, 'tab:red'),
-              ('backup CBF', backup, 'tab:green'),
-              ('HOCBF (coupled)', hocbf, 'tab:blue')]
+    tag, c = METHOD_STYLE[method]
 
-    for tag, d, c in series:
-        axp.plot(t_state, d['s_ego'], color=c, lw=LW, label=f'Ego ({tag})')
-        axp.plot(t_state, d['s_rear'], color=c, lw=LW, ls='--')
+    axp.plot(t_state, out['s_ego'], color=c, lw=LW, label=f'Ego ({tag})')
+    axp.plot(t_state, out['s_rear'], color=c, lw=LW, ls='--', label='Rear')
     if not speed_mode:
         axp.axhline(cfg['stop_wall_x'], color='k', ls=':', lw=2, label='stop target')
     axp.set_ylabel('position [m]'); axp.set_title('Positions (ego solid, rear dashed)')
     axp.legend(ncol=2, fontsize=9); axp.grid(alpha=0.3)
 
-    for tag, d, c in series:
-        axg.plot(t_ctrl, d['h_r'], color=c, lw=LW, label=f'{tag}')
+    axg.plot(t_ctrl, out['h_r'], color=c, lw=LW, label=f'{tag}')
     axg.axhline(0.0, color='red', ls=':', lw=2, label='collision (h_r=0)')
     axg.axhline(cfg['d_min'], color='gray', ls='--', lw=1.5, label=f"d_min={cfg['d_min']}")
-    axg.set_ylabel('rear gap h_r [m]')
-    axg.set_title('Rear gap: baseline rear-ends; backup CBF escapes; HOCBF rides the boundary')
+    axg.set_ylabel('rear gap h_r [m]'); axg.set_title('Rear gap h_r')
     axg.legend(ncol=2); axg.grid(alpha=0.3)
 
-    for tag, d, c in series:
-        axv.plot(t_state, d['v_ego'], color=c, lw=LW, label=f'Ego ({tag})')
-        axv.plot(t_state, d['v_rear'], color=c, lw=LW, ls='--')
+    axv.plot(t_state, out['v_ego'], color=c, lw=LW, label=f'Ego ({tag})')
+    axv.plot(t_state, out['v_rear'], color=c, lw=LW, ls='--', label='Rear')
     if speed_mode:
         axv.axhline(cfg['v_desired'], color='k', ls=':', lw=2, label='target speed')
     axv.set_ylabel('velocity [m/s]'); axv.set_title('Velocities (ego solid, rear dashed)')
     axv.legend(ncol=2, fontsize=9); axv.grid(alpha=0.3)
 
-    axu.plot(t_ctrl, hocbf['u_nom'], color='gray', lw=LW * 0.8, ls=':',
-             label='ego nominal (wants to brake/stop)')
-    for tag, d, c in series:
-        axu.plot(t_ctrl, d['u_ego'], color=c, lw=LW, label=f'ego ({tag})')
+    axu.plot(t_ctrl, out['u_nom'], color='gray', lw=LW * 0.8, ls=':',
+             label='ego nominal (unfiltered)')
+    axu.plot(t_ctrl, out['u_ego'], color=c, lw=LW, label=f'ego ({tag})')
     axu.set_ylabel('ego accel [m/s^2]'); axu.set_xlabel('time [s]'); axu.set_title('Ego control')
     axu.legend(fontsize=9); axu.grid(alpha=0.3)
 
-    if speed_mode:
-        fig.suptitle(f"Ego + rear: ego regulates to v_desired={cfg['v_desired']} m/s; "
-                     'backup CBF escapes; coupled HOCBF rides the safe boundary')
-    else:
-        fig.suptitle('Ego + rear: backup CBF escapes (abandons stop); '
-                     'coupled HOCBF brakes gently to ride the safe boundary')
+    fig.suptitle(f"Ego + rear ({tag})")
     save_figure(fig, save_dir, 'ego_rear.png', footnote)
 
 
-def build_cfg(args):
+def build_cfg(args, method=None):
+    """Config for one method, holding only the parameters that method actually uses.
+
+    The cfg is both saved as config.json and fingerprinted for dedup, so pruning to the
+    relevant params keeps each method's record clean (e.g. a hocbf run is not
+    distinguished by an unused backup gain).
+    """
+    if method is None:
+        method = getattr(args, 'method', 'hocbf')
     # Road/desired speed for the OVM models, decoupled from the ego escape speed.
     v_road = args.v_road
     ego_nom = {'alpha': 0.6, 'beta': 0.3, 'kappa': 0.5, 'h_st': 2.0,
@@ -179,33 +187,48 @@ def build_cfg(args):
                    'a_e': resolve(args.rear_a_decel, 2.0),
                    'T': resolve(args.rear_T, 1.0), 's0': 2.0,
                    'b_comfort': resolve(args.rear_b, 2.0)}
-    # What the filter *assumes* about the rear (default = actual unless overridden).
-    rear_assumed = dict(rear_actual)
-    for key, val in [('kappa', args.assumed_rear_kappa), ('a_e', args.assumed_rear_a_decel),
-                     ('alpha', args.assumed_rear_alpha), ('beta', args.assumed_rear_beta)]:
-        if val is not None:
-            rear_assumed[key] = val
-    return {
-        'scenario': 'ego_rear', 'ego_model': args.ego_model,
-        'ego_target': args.ego_target, 'v_desired': resolve(args.v_desired, v_road),
+
+    # Common: sim setup + ego nominal + the *actual* rear (used by every method).
+    cfg = {
+        'scenario': 'ego_rear', 'method': method, 'ego_model': args.ego_model,
+        'ego_target': args.ego_target,
         's_ego0': 0.0, 'v_ego0': args.ego_v0, 'gap_r0': resolve(args.gap_r0, 3.0),
-        'stop_wall_x': args.stop_distance, 'd_min': args.d_min,
-        'u_acc': args.u_acc, 'v_max': args.v_max, 'v_road': v_road,
-        'gamma': args.gamma, 'gamma_terminal': args.gamma_terminal,
-        'backup_terminal': args.backup_terminal,
-        'backup_horizon': args.backup_horizon,
-        'hocbf_a1': args.hocbf_a1, 'hocbf_a2': args.hocbf_a2,
-        'hocbf_robust_factor': args.hocbf_robust_factor,
-        'ego_nom': ego_nom, 'rear_model': args.rear_model,
-        'rear_assumed_model': resolve(args.assumed_rear_model, args.rear_model),
-        'rear_actual': rear_actual, 'rear_assumed': rear_assumed,
+        'd_min': args.d_min, 'u_acc': args.u_acc, 'v_max': args.v_max, 'v_road': v_road,
+        'ego_nom': ego_nom, 'rear_model': args.rear_model, 'rear_actual': rear_actual,
     }
+    # Only the nominal objective actually in effect.
+    if args.ego_target == 'speed':
+        cfg['v_desired'] = resolve(args.v_desired, v_road)
+    else:
+        cfg['stop_wall_x'] = args.stop_distance
+
+    # The assumed rear model is only consulted by the filters (baseline has no filter).
+    if method in ('bcbf', 'hocbf'):
+        rear_assumed = dict(rear_actual)
+        for key, val in [('kappa', args.assumed_rear_kappa), ('a_e', args.assumed_rear_a_decel),
+                         ('alpha', args.assumed_rear_alpha), ('beta', args.assumed_rear_beta)]:
+            if val is not None:
+                rear_assumed[key] = val
+        cfg['rear_assumed_model'] = resolve(args.assumed_rear_model, args.rear_model)
+        cfg['rear_assumed'] = rear_assumed
+    if method == 'bcbf':
+        cfg.update({'gamma': args.gamma, 'gamma_terminal': args.gamma_terminal,
+                    'backup_terminal': args.backup_terminal,
+                    'backup_horizon': args.backup_horizon})
+    if method == 'hocbf':
+        cfg.update({'hocbf_a1': args.hocbf_a1, 'hocbf_a2': args.hocbf_a2,
+                    'hocbf_robust_factor': args.hocbf_robust_factor})
+    return cfg
 
 
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--method', default='baseline', choices=['baseline', 'bcbf', 'hocbf'],
+                   help="controller to run (one per invocation; default: baseline). "
+                        "'bcbf' = backup CBF, 'hocbf' = coupled HOCBF. Saved as "
+                        "series_<method>.npz; compare runs with plot_runs.py.")
     p.add_argument('--dt', type=float, default=0.05)
-    p.add_argument('--tf', type=float, default=9.0)
+    p.add_argument('--tf', type=float, default=12.0)
     p.add_argument('--gamma', type=float, default=1.0)
     p.add_argument('--gamma-terminal', type=float, default=2.0,
                    help='backup-CBF terminal (gap-at-horizon) class-K gain')
@@ -255,7 +278,10 @@ def build_parser():
     p.add_argument('--output-dir', default=None,
                    help='results directory (default: <example>/output); runs are '
                         'saved as <output-dir>/run_NNN/')
-    p.add_argument('--force', action='store_true')
+    p.add_argument('--force', action='store_true',
+                   help='recompute a matching config into a fresh run_NNN (keeps the duplicate)')
+    p.add_argument('--override', action='store_true',
+                   help='overwrite the matching run_NNN in place instead of creating a new one')
     p.add_argument('--note', default='')
     return p
 
@@ -268,69 +294,78 @@ def main():
     t_state = np.arange(n_sim + 1) * dt
     t_ctrl = np.arange(n_sim) * dt
 
-    cfg = build_cfg(args)
+    method = args.method
+    cfg = build_cfg(args, method)
     reg = RunRegistry(out_dir, key_columns=REGISTER_COLUMNS)
-    run, ok = registry_run(reg, cfg, args.force)
+    run, ok = registry_run(reg, cfg, args.force, args.override)
     if not ok:
         return
 
-    base = simulate_ego_rear(cfg, dt, n_sim, 'baseline')
-    backup = simulate_ego_rear(cfg, dt, n_sim, 'cbf')
-    hocbf = simulate_ego_rear(cfg, dt, n_sim, 'hocbf')
+    # Run the single selected method and persist its time-series for re-plotting.
+    out = simulate_ego_rear(cfg, dt, n_sim, method)
+    save_run_series(run.path, method, t_state, t_ctrl, out)
 
-    def _mm(d):
-        return float(d['h_r'].min()), float(d['v_ego'].max())
-    mhr_b, _ = _mm(base)
-    mhr_k, vk = _mm(backup)
-    mhr_h, vh = _mm(hocbf)
+    is_filter = method in ('bcbf', 'hocbf')
+    mismatch = bool(is_filter and (cfg['rear_assumed'] != cfg['rear_actual']
+                                   or cfg['rear_assumed_model'] != cfg['rear_model']))
     if cfg['ego_target'] == 'speed':
         print(f"  ego target: regulate to v_desired = {cfg['v_desired']:.1f} m/s (no wall)")
     else:
         print(f"  ego target: stop at wall x = {cfg['stop_wall_x']:.1f} m")
-    print(f"  baseline  : min h_r = {mhr_b:7.3f} m  ({'REAR-END' if mhr_b <= 0 else 'safe'})")
-    print(f"  backup CBF: min h_r = {mhr_k:7.3f} m  (safe, escapes to v={vk:.1f})")
-    print(f"  HOCBF     : min h_r = {mhr_h:7.3f} m  (safe, peak v={vh:.1f}, "
-          f"rides boundary)  [a1={cfg['hocbf_a1']},a2={cfg['hocbf_a2']}]")
 
-    mismatch = (cfg['rear_assumed'] != cfg['rear_actual']
-                or cfg['rear_assumed_model'] != cfg['rear_model'])
-    backup_qp = qp_solver_stats(backup['qp_status'])
-    print(f"  backup QP : {backup_qp['total_steps']} steps, "
-          f"infeasible={backup_qp['num_infeasible']}, failure={backup_qp['num_failure']}, "
-          f"unbounded={backup_qp['num_unbounded']}, inaccurate={backup_qp['num_inaccurate']} "
-          f"({'healthy' if backup_qp['healthy'] else 'UNHEALTHY'})")
-    # HOCBF is analytic (no QP); 'infeasible' here = required accel exceeded a_acc.
-    hocbf_feas = qp_solver_stats(hocbf['qp_status'])
-    print(f"  HOCBF feas: {hocbf_feas['total_steps']} steps, "
-          f"infeasible={hocbf_feas['num_infeasible']} "
-          f"({'healthy' if hocbf_feas['healthy'] else 'UNHEALTHY'})")
-    results = {'baseline_min_h_r': mhr_b, 'backup_min_h_r': mhr_k, 'hocbf_min_h_r': mhr_h,
-               'backup_peak_v': vk, 'hocbf_peak_v': vh,
-               'baseline_rear_end': bool(mhr_b <= 0), 'hocbf_safe': bool(mhr_h > 0),
-               'param_mismatch': bool(mismatch),
-               'backup_qp': backup_qp, 'hocbf_feasibility': hocbf_feas}
+    mhr = float(out['h_r'].min())
+    vmx = float(out['v_ego'].max())
+    results = {'method': method, 'param_mismatch': mismatch,
+               f"{RESULT_KEY[method]}_min_h_r": mhr, f"{RESULT_KEY[method]}_peak_v": vmx}
+    if method == 'baseline':
+        results['baseline_rear_end'] = bool(mhr <= 0)
+        print(f"  baseline  : min h_r = {mhr:7.3f} m  ({'REAR-END' if mhr <= 0 else 'safe'})")
+    elif method == 'bcbf':
+        print(f"  backup CBF: min h_r = {mhr:7.3f} m  (peak v={vmx:.1f})")
+        backup_qp = qp_solver_stats(out['qp_status'])
+        results['backup_qp'] = backup_qp
+        print(f"  backup QP : {backup_qp['total_steps']} steps, "
+              f"infeasible={backup_qp['num_infeasible']}, failure={backup_qp['num_failure']}, "
+              f"unbounded={backup_qp['num_unbounded']}, inaccurate={backup_qp['num_inaccurate']} "
+              f"({'healthy' if backup_qp['healthy'] else 'UNHEALTHY'})")
+    elif method == 'hocbf':
+        results['hocbf_safe'] = bool(mhr > 0)
+        print(f"  HOCBF     : min h_r = {mhr:7.3f} m  (peak v={vmx:.1f}, "
+              f"rides boundary)  [a1={cfg['hocbf_a1']},a2={cfg['hocbf_a2']}]")
+        # HOCBF is analytic (no QP); 'infeasible' here = required accel exceeded a_acc.
+        hocbf_feas = qp_solver_stats(out['qp_status'])
+        results['hocbf_feasibility'] = hocbf_feas
+        print(f"  HOCBF feas: {hocbf_feas['total_steps']} steps, "
+              f"infeasible={hocbf_feas['num_infeasible']} "
+              f"({'healthy' if hocbf_feas['healthy'] else 'UNHEALTHY'})")
     with open(os.path.join(run.path, 'results.json'), 'w') as fh:
         json.dump(results, fh, indent=2)
 
     rp = cfg['rear_actual']
     rear_tag = cfg['rear_model']
-    if cfg['rear_assumed_model'] != cfg['rear_model']:
+    if is_filter and cfg['rear_assumed_model'] != cfg['rear_model']:
         rear_tag += f"/assumed={cfg['rear_assumed_model']}"
     ego_target_tag = (f"speed(v_des={cfg['v_desired']})" if cfg['ego_target'] == 'speed'
                       else f"stop={args.stop_distance}")
-    footnote = (f"ego_rear: ego={cfg['ego_model']}(u_acc={args.u_acc},"
-                f"{ego_target_tag}) rear={rear_tag}"
-                f"(kappa={rp['kappa']},a_e={rp['a_e']}) "
-                f"gap_r0={cfg['gap_r0']} d_min={args.d_min} "
-                f"backup(g={cfg['gamma']},gT={cfg['gamma_terminal']},"
-                f"term={cfg['backup_terminal']}) "
-                f"hocbf(a1={cfg['hocbf_a1']},a2={cfg['hocbf_a2']},"
-                f"rf={cfg['hocbf_robust_factor']}) mismatch={mismatch}")
-    make_figure(base, backup, hocbf, cfg, t_state, t_ctrl, run.path, footnote)
-    reg.commit(run, columns={'scenario': 'ego_rear', 'ego_model': cfg['ego_model'],
-                             'ego_target': cfg['ego_target'], 'v_desired': cfg['v_desired'],
+    parts = [f"ego_rear[{method}]: ego={cfg['ego_model']}(u_acc={args.u_acc},{ego_target_tag})",
+             f"rear={rear_tag}(kappa={rp['kappa']},a_e={rp['a_e']})",
+             f"gap_r0={cfg['gap_r0']} d_min={args.d_min}"]
+    if method == 'bcbf':
+        parts.append(f"backup(g={cfg['gamma']},gT={cfg['gamma_terminal']},"
+                     f"term={cfg['backup_terminal']})")
+    if method == 'hocbf':
+        parts.append(f"hocbf(a1={cfg['hocbf_a1']},a2={cfg['hocbf_a2']},"
+                     f"rf={cfg['hocbf_robust_factor']})")
+    if is_filter:
+        parts.append(f"mismatch={mismatch}")
+    footnote = ' '.join(parts)
+    make_figure(method, out, cfg, t_state, t_ctrl, run.path, footnote)
+    reg.commit(run, columns={'scenario': 'ego_rear', 'method': method,
+                             'ego_model': cfg['ego_model'],
+                             'ego_target': cfg['ego_target'],
+                             'v_desired': cfg.get('v_desired', ''),
                              'rear_model': cfg['rear_model'],
-                             'assumed_rear_model': cfg['rear_assumed_model'],
+                             'assumed_rear_model': cfg.get('rear_assumed_model', ''),
                              'rear_kappa': rp['kappa'], 'rear_a_decel': rp['a_e'],
                              'gap_r0': cfg['gap_r0'], 'mismatch': mismatch,
                              'note': args.note})

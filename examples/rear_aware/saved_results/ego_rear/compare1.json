@@ -1,0 +1,8 @@
+{
+  "output": "saved_results/ego_rear/compare_baseline_bcbf_hocbf.png",
+  "runs": {
+    "baseline": "saved_results/ego_rear/run_001",
+    "backup CBF": "saved_results/ego_rear/run_002",
+    "HOCBF": "saved_results/ego_rear/run_003"
+  }
+}

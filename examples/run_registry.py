@@ -20,6 +20,7 @@ Typical use
     match = reg.find_match(config)
     if match is not None:
         print(f"already computed as {match.name} at {match.path}")
+        # ... or reuse it in place: run = reg.overwrite_run(match, config)
     else:
         run = reg.create_run(config)         # makes output/run_NNN + config.json
         ... write figures/files into run.path ...
@@ -134,16 +135,36 @@ class RunRegistry:
             json.dump(config, fh, indent=2)
         return RunInfo(name, path, config_fingerprint(config))
 
+    def overwrite_run(self, match: RunInfo, config: dict) -> RunInfo:
+        """Reuse an existing (matched) run folder in place instead of allocating a new
+        one: rewrite its config.json and return its RunInfo. The caller regenerates the
+        run's outputs (figures, series, results) into the same folder, and commit()
+        refreshes the existing register row rather than appending a duplicate."""
+        path = match.path
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, 'config.json'), 'w') as fh:
+            json.dump(config, fh, indent=2)
+        return RunInfo(match.name, path, config_fingerprint(config))
+
     def commit(self, run: RunInfo, columns=None) -> None:
-        """Append a row for `run` to register.csv (creating it if needed)."""
+        """Write a register row for `run` (replace-or-append by run_name).
+
+        A row with the same run_name (e.g. from an overwrite_run) is replaced in place
+        so re-committing a run does not create a duplicate entry; otherwise the row is
+        added. Rows are written sorted by run_name index, so overriding a run keeps it in
+        its natural position instead of moving it to the end. The header is preserved to
+        avoid column drift across invocations.
+        """
         columns = columns or {}
         header = list(self.BASE_COLUMNS) + self.key_columns + ['config_path']
-        # Preserve an existing header to avoid column drift across invocations.
+        # Preserve an existing header; keep all other runs' rows as-is.
+        existing_rows = []
         if os.path.exists(self.register_path):
             with open(self.register_path, newline='') as fh:
                 existing = next(csv.reader(fh), None)
             if existing:
                 header = existing
+            existing_rows = [r for r in self._rows() if r.get('run_name') != run.name]
         row = {
             'run_name': run.name,
             'timestamp': datetime.now().isoformat(timespec='seconds'),
@@ -154,9 +175,10 @@ class RunRegistry:
         for k in self.key_columns:
             row[k] = columns.get(k, '')
 
-        write_header = not os.path.exists(self.register_path)
-        with open(self.register_path, 'a', newline='') as fh:
+        all_rows = sorted(existing_rows + [row],
+                          key=lambda r: self._index_of(r.get('run_name', '')))
+        with open(self.register_path, 'w', newline='') as fh:
             writer = csv.DictWriter(fh, fieldnames=header, extrasaction='ignore')
-            if write_header:
-                writer.writeheader()
-            writer.writerow(row)
+            writer.writeheader()
+            for r in all_rows:
+                writer.writerow(r)

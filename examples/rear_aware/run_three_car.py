@@ -19,7 +19,8 @@ import argparse
 import numpy as np
 
 from rear_aware_common import (plt, LW, BODY_LENGTH, L_COMBINED, REGISTER_COLUMNS,
-                               resolve, registry_run, save_figure, qp_solver_stats, _HERE)
+                               resolve, registry_run, save_figure, save_run_series,
+                               qp_solver_stats, _HERE)
 from double_integrator_1d import DoubleIntegrator1D                # noqa: E402
 from car_following_models import nominal_accel, lead_velocity      # noqa: E402
 from car_following_cbf import CarFollowingCBF1D                    # noqa: E402
@@ -184,7 +185,10 @@ def build_parser():
     p.add_argument('--output-dir', default=None,
                    help='results directory (default: <example>/output); runs are '
                         'saved as <output-dir>/run_NNN/')
-    p.add_argument('--force', action='store_true')
+    p.add_argument('--force', action='store_true',
+                   help='recompute a matching config into a fresh run_NNN (keeps the duplicate)')
+    p.add_argument('--override', action='store_true',
+                   help='overwrite the matching run_NNN in place instead of creating a new one')
     p.add_argument('--note', default='')
     return p
 
@@ -199,11 +203,12 @@ def main():
 
     cfg = build_cfg(args)
     reg = RunRegistry(out_dir, key_columns=REGISTER_COLUMNS)
-    run, ok = registry_run(reg, cfg, args.force)
+    run, ok = registry_run(reg, cfg, args.force, args.override)
     if not ok:
         return
 
     out = simulate_three_car(cfg, dt, n_sim)
+    save_run_series(run.path, 'three_car', t_state, t_ctrl, out)
     min_hf, min_hr = float(out['h_f'].min()), float(out['h_r'].min())
     print(f"  min h_f = {min_hf:.3f} m ({'SAFE' if min_hf > 0 else 'collide'} vs lead)")
     print(f"  min h_r = {min_hr:.3f} m ({'rear-end!' if min_hr <= 0 else 'safe'} from rear)")

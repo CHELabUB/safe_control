@@ -12,6 +12,8 @@ Geometry:
 import os
 import sys
 
+import numpy as np
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.abspath(os.path.join(_HERE, '..')))                  # run_registry
@@ -32,7 +34,7 @@ L_COMBINED = BODY_LENGTH
 
 # Register columns (superset across scenarios) so both scripts write a consistent
 # header into a shared register.csv; unused fields are left blank per row.
-REGISTER_COLUMNS = ['scenario', 'ego_model', 'ego_target', 'v_desired',
+REGISTER_COLUMNS = ['scenario', 'method', 'ego_model', 'ego_target', 'v_desired',
                     'rear_model', 'assumed_rear_model', 'rear_kappa', 'rear_a_decel',
                     'gap_r0', 'mismatch', 'note']
 
@@ -40,6 +42,50 @@ REGISTER_COLUMNS = ['scenario', 'ego_model', 'ego_target', 'v_desired',
 def resolve(val, default):
     """CLI override if provided (not None), else the scenario-specific default."""
     return default if val is None else val
+
+
+def save_run_series(save_dir, method, t_state, t_ctrl, series):
+    """Save one method's time-series to ``<save_dir>/series_<method>.npz``.
+
+    Persists every numeric array in ``series`` (plus the two time axes) so a run can be
+    re-plotted later — by the per-run figure or the independent ``plot_runs.py`` — without
+    re-simulating. Non-numeric / ragged entries (e.g. an empty status list) are skipped.
+
+    Args:
+        save_dir: the run folder (e.g. ``output/run_007``).
+        method: short method tag used in the filename ('baseline', 'bcbf', 'hocbf', ...).
+        t_state, t_ctrl: the state-length and control-length time axes.
+        series: dict of per-step arrays (the simulate ``out`` dict).
+
+    Returns:
+        Path to the written ``.npz``.
+    """
+    arrays = {'t_state': np.asarray(t_state, dtype=float),
+              't_ctrl': np.asarray(t_ctrl, dtype=float)}
+    for key, val in series.items():
+        arr = np.asarray(val)
+        if arr.size == 0 or arr.dtype == object or arr.dtype.kind not in 'fiu':
+            continue                                  # skip status lists / empty / ragged
+        arrays[key] = arr.astype(float)
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, f'series_{method}.npz')
+    np.savez(path, **arrays)
+    return path
+
+
+def load_run_series(run_path, method=None):
+    """Load a saved series ``.npz`` -> dict of arrays.
+
+    Args:
+        run_path: a run folder, or a direct path to a ``series_*.npz`` file.
+        method: method tag (required when ``run_path`` is a folder).
+    """
+    if run_path.endswith('.npz'):
+        path = run_path
+    else:
+        path = os.path.join(run_path, f'series_{method}.npz')
+    with np.load(path) as npz:
+        return {k: npz[k] for k in npz.files}
 
 
 def qp_solver_stats(statuses):
@@ -79,13 +125,24 @@ def qp_solver_stats(statuses):
     }
 
 
-def registry_run(reg, cfg, force):
-    """Dedup + allocate a run. Returns (run, ok); ok=False means skip (matched)."""
+def registry_run(reg, cfg, force=False, override=False):
+    """Dedup + allocate a run. Returns (run, ok); ok=False means skip (matched).
+
+    On a config match:
+      - override=True  -> reuse and overwrite the matched run_NNN folder in place;
+      - force=True     -> recompute into a fresh run_NNN (the duplicate is kept);
+      - neither        -> skip (nothing to do).
+    """
     match = reg.find_match(cfg)
-    if match is not None and not force:
-        print(f"Configuration already computed as '{match.name}' at {match.path}")
-        print("Nothing to do (pass --force to recompute).")
-        return None, False
+    if match is not None:
+        if override:
+            run = reg.overwrite_run(match, cfg)
+            print(f"=== Overriding run: {run.name} [{run.fingerprint}] ({run.path}) ===")
+            return run, True
+        if not force:
+            print(f"Configuration already computed as '{match.name}' at {match.path}")
+            print("Nothing to do (pass --force for a new run, or --override to overwrite it).")
+            return None, False
     run = reg.create_run(cfg)
     print(f"=== New run: {run.name} [{run.fingerprint}] ({run.path}) ===")
     return run, True

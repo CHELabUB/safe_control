@@ -1,0 +1,7 @@
+{
+  "output": "saved_results/ego_rear/compare_bcbf_terminal_constraints.png",
+  "runs": {
+    "drop S_b": "saved_results/ego_rear/run_002",
+    "keep S_b": "saved_results/ego_rear/run_004"
+  }
+}

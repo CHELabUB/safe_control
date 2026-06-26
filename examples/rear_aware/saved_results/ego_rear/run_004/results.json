@@ -1,0 +1,17 @@
+{
+  "method": "bcbf",
+  "param_mismatch": false,
+  "backup_min_h_r": 2.208448136004339,
+  "backup_peak_v": 9.0,
+  "backup_qp": {
+    "total_steps": 240,
+    "status_counts": {
+      "optimal": 240
+    },
+    "num_infeasible": 0,
+    "num_failure": 0,
+    "num_unbounded": 0,
+    "num_inaccurate": 0,
+    "healthy": true
+  }
+}

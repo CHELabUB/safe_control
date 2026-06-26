@@ -66,7 +66,7 @@ reacts to what the ego actually does. The backup rollout assumes the rear reacts
 the ego's *escape*, but the ego applies the *filtered* (near-nominal) control, so
 the rear reacts to that instead. The guarantee rests on a reaction the human never
 sees. It also forces an over-aggressive escape (accelerate to `v_max`, abandoning
-the stop). It is kept in the example (`mode='cbf'`) only as a contrast.
+the stop). It is kept in the example (`--methods bcbf`) only as a contrast.
 
 ### Coupled HOCBF (the principled approach)
 Model the rear **in the closed loop**: joint state `[h_r, v_ego, v_rear]` with the
@@ -118,6 +118,61 @@ ego_rear **drops it by default** (`--no-backup-terminal`); pass
 `--backup-terminal` to restore it. The `RearEndBackupCBF1D(use_terminal=...)` class
 default keeps the terminal.
 
+## Running individual methods, saved data, and comparison plots
+
+`run_ego_rear.py` runs **one** controller per invocation, chosen with `--method`
+(default `hocbf`):
+
+```bash
+uv run python examples/rear_aware/run_ego_rear.py --method baseline
+uv run python examples/rear_aware/run_ego_rear.py --method bcbf
+uv run python examples/rear_aware/run_ego_rear.py --method hocbf
+```
+
+The method is part of the run's config — so each is its own registry entry — and its
+`config.json` records **only the parameters that method uses** (e.g. a `bcbf` run stores
+the backup gains/horizon; a `hocbf` run stores the HOCBF gains; `baseline` stores neither
+and no assumed-rear model). Every run **saves its time-series** to
+`<run_dir>/series_<method>.npz` (`run_three_car.py` saves `series_three_car.npz`) so runs
+can be re-plotted without re-simulating.
+
+**`plot_runs.py`** is an independent comparison plotter driven by a minimal JSON spec — a
+`runs` map of `{"run-name": "path"}` (each key the label, each value the run folder) plus an
+optional `output` figure path (see `compare_spec.example.json`):
+
+```bash
+uv run python examples/rear_aware/plot_runs.py examples/rear_aware/compare_spec.example.json
+```
+
+```json
+{
+  "output": "output/compare_methods.png",
+  "runs": {
+    "baseline": "output/run_001",
+    "backup CBF": "output/run_002",
+    "HOCBF": "output/run_003"
+  }
+}
+```
+
+A bare `{"run-name": "path"}` object (no `runs`/`output` wrapper) is still accepted as the
+runs map. Relative run paths are resolved by trying the example directory
+(`examples/rear_aware`), then the spec file's directory, then the cwd — the first holding a
+`series_*.npz` wins — so paths written relative to the example dir (e.g.
+`saved_results/ego_rear/run_001`) or beside the spec both work. The single `series_*.npz`
+in each run folder is loaded automatically. The figure has a fixed layout —
+a left column of three time series (rear gap `h_r` with `h_r=0`/`d_min` dashed; ego velocity
+with the target speed dashed; ego acceleration as solid actual + thin dashed nominal in the
+same colour) and a right-hand **phase portrait** (ego speed `v` on the y-axis vs rear gap
+`h_r` on the x-axis) overlaying the desired-speed line, vertical `h=0` and `h=d_min` lines
+with the unsafe `h<d_min` region shaded red, and the rear's OVM and IDM range-policy curves. Reference values (`d_min`, target speed, rear params)
+are read from the first run's `config.json`. The output path is the spec's `output`,
+overridden by `--output` when supplied, else `<spec_dir>/compare_runs.png`.
+
+It also prints a **config-difference table** read directly from each run's `config.json`
+(the full pruned config, unlike `register.csv` which keeps only a few key columns): keys
+identical across all runs are hidden, and a key absent from a run's config shows as `-`.
+
 ## Parameter sweep
 
 Finding representative cases needs tuning. `sweep_rear_aware.py` runs a grid
@@ -130,9 +185,11 @@ uv run python examples/rear_aware/sweep_rear_aware.py --scenario ego_rear     # 
 ```
 Render a chosen case with the matching `run_three_car.py` / `run_ego_rear.py`
 flags; each run is a registry entry under `output/run_NNN/` (dedup by config; see
-`examples/README.md`). Use `--output-dir <path>` on any of these scripts to write
-the results (figures, configs, `register.csv`) somewhere other than the default
-`<example>/output`.
+`examples/README.md`). On a config that already exists, `--force` recomputes it into a
+**new** `run_NNN` (keeping the duplicate) while `--override` **overwrites the existing**
+`run_NNN` in place (no duplicate folder or register row). Use `--output-dir <path>` on any
+of these scripts to write the results (figures, configs, `register.csv`) somewhere other
+than the default `<example>/output`.
 
 ## Known limitations / TODO
 - **HOCBF needs a rear model.** The coupled HOCBF assumes a (bounded) model of the
@@ -150,9 +207,11 @@ the results (figures, configs, `register.csv`) somewhere other than the default
 ## Files
 | File | Role |
 |------|------|
-| `run_three_car.py` | Scenario 1 (three-car): simulation, figure, registry |
-| `run_ego_rear.py` | Scenario 2 (ego + rear): baseline / backup CBF / HOCBF, figure, registry |
-| `rear_aware_common.py` | shared constants, matplotlib, registry/figure helpers |
+| `run_three_car.py` | Scenario 1 (three-car): simulation, figure, registry, saved series |
+| `run_ego_rear.py` | Scenario 2 (ego + rear): one `--method` (baseline/bcbf/hocbf) per run, figure, registry, saved series |
+| `plot_runs.py` | independent comparison plotter (overlay saved runs via a JSON spec) |
+| `compare_spec.example.json` | example spec for `plot_runs.py` |
+| `rear_aware_common.py` | shared constants, matplotlib, registry/figure + series save/load helpers |
 | `coupled_rear_cbf.py` | `CoupledRearCBF` — interaction-consistent HOCBF (recommended) |
 | `rear_backup_cbf.py` | `RearEndBackupCBF1D` — accelerate-to-escape backup CBF (contrast) |
 | `rear_aware_models.py` | ego OVM-to-stop nominal + rear follower helpers |

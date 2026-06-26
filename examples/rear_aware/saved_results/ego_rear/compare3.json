@@ -1,0 +1,8 @@
+{
+  "output": "saved_results/ego_rear/compare_hocbf_robust.png",
+  "runs": {
+    "HOCBF r = 1": "saved_results/ego_rear/run_003",
+    "HOCBF r = 0.5": "saved_results/ego_rear/run_006",
+    "HOCBF r = 0": "saved_results/ego_rear/run_005"
+  }
+}

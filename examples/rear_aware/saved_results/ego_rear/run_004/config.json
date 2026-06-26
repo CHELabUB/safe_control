@@ -1,23 +1,15 @@
 {
   "scenario": "ego_rear",
+  "method": "bcbf",
   "ego_model": "ovm",
   "ego_target": "speed",
-  "v_desired": 1.0,
   "s_ego0": 0.0,
   "v_ego0": 9.0,
   "gap_r0": 3.0,
-  "stop_wall_x": 18.0,
   "d_min": 1.0,
   "u_acc": 3.0,
   "v_max": 15.0,
   "v_road": 12.0,
-  "gamma": 1.0,
-  "gamma_terminal": 2.0,
-  "backup_terminal": false,
-  "backup_horizon": 5.0,
-  "hocbf_a1": 1.0,
-  "hocbf_a2": 1.0,
-  "hocbf_robust_factor": 1.0,
   "ego_nom": {
     "alpha": 0.6,
     "beta": 0.3,
@@ -32,7 +24,6 @@
     "b_comfort": 2.0
   },
   "rear_model": "ovm",
-  "rear_assumed_model": "ovm",
   "rear_actual": {
     "alpha": 0.6,
     "beta": 0.4,
@@ -46,6 +37,8 @@
     "s0": 2.0,
     "b_comfort": 2.0
   },
+  "v_desired": 1.0,
+  "rear_assumed_model": "ovm",
   "rear_assumed": {
     "alpha": 0.6,
     "beta": 0.4,
@@ -58,5 +51,9 @@
     "T": 1.0,
     "s0": 2.0,
     "b_comfort": 2.0
-  }
+  },
+  "gamma": 1.0,
+  "gamma_terminal": 2.0,
+  "backup_terminal": true,
+  "backup_horizon": 5.0
 }
