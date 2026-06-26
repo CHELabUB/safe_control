@@ -203,6 +203,36 @@ uv run python examples/rear_aware/plot_runs.py examples/rear_aware/temp_represen
   — five representative runs (`baseline`, `passive`, `under`, `accurate`, `over`) with the
   behavior overlay `compare_runs.png` and the `compare_spec.json` that produced it.
 
+## Scenario 3 — `sandwich` (combined front + rear) — *in progress*
+
+The end goal: the ego **between** a lead and a follower, enforcing `h_f >= 0` and `h_r >= 0`
+together. This is the scenario where the **interaction-model accuracy decides *safety***, unlike
+the no-lead `ego_rear` above (where the forward escape makes the filter robust to mismatch and
+only *performance* degrades). Because the ego cannot escape forward, over-trusting the rear's
+responsiveness should cause a rear-end.
+
+**Controller** (`sandwiched_cbf.py`, driver `run_sandwich.py`). A forward CBF vs the lead (upper
+bound on accel, `CarFollowingCBF1D`) combined with a coupled rear HOCBF (lower bound,
+`CoupledRearCBF`, using the ego's *assumed* rear model), resolved **forward-first** on conflict
+(never hit the lead). The ego nominal is deliberately aggressive (tailgating; brakes late/hard).
+
+**Finding so far — a naive front-ceiling / rear-floor clip is *not* enough.** With the aggressive
+nominal, the accurate and over-estimated models rear-end **identically** (`min h_r ≈ −3.3`,
+`conflict_fraction ≈ 0.44`): the ego tailgates to the forward boundary (`min h_f ≈ 0`), so when
+the lead brakes the forward CBF demands a hard brake *regardless of the rear model*. The rear
+floor only limits braking **reactively** — it never stopped the ego from tailgating, so the
+accurate model cannot help. Inherent tension: the brake must be hard enough for the rear floor
+to bind (⇒ tailgating ⇒ forward conflict), **unless the ego proactively hangs back**.
+
+**Fix being implemented — a rear-aware forward CBF.** The ego plans to brake only at a rate the
+rear can survive: compute `a_e_eff` = the largest ego deceleration for which the *assumed* rear
+keeps `h_r >= d_min`, and feed that **reduced** braking authority into the forward CBF's
+safe-distance. Accurate (sluggish) rear → small `a_e_eff` → larger forward gap → ego hangs back →
+safe; over-estimate → large `a_e_eff` → tailgates → the real sluggish rear is hit. This couples
+the rear `α, β` to the forward gap (so the accuracy sweep drives it) and yields the proactive
+"prepare for a sudden stop" behaviour. (The backup-CBF variant, which needs a brake-behind-lead
+backup policy, is a later stage.)
+
 ## Running individual methods, saved data, and comparison plots
 
 `run_ego_rear.py` runs **one** controller per invocation, chosen with `--method`
@@ -299,13 +329,16 @@ than the default `<example>/output`.
   degeneracy worked around by keeping the escape `v_max` above road speed.
 - **Combined front + rear.** The end goal is the ego *between* a lead and a follower,
   enforcing `h_f >= 0` and `h_r >= 0` together (they conflict: forward safety wants
-  braking, rear safety wants gentle braking / pulling away). These scenarios are the
-  building blocks; combining the forward CBF with the coupled rear HOCBF is next.
+  braking, rear safety wants gentle braking / pulling away). Now in progress as
+  **Scenario 3 (`sandwich`)** — see that section for the controller and the current
+  finding (a naive front+rear clip is insufficient; a rear-aware forward CBF is needed).
 
 ## Files
 | File | Role |
 |------|------|
 | `run_three_car.py` | Scenario 1 (three-car): simulation, figure, registry, saved series |
+| `run_sandwich.py` | Scenario 3 (sandwich): combined front+rear ego (WIP; rear-aware forward CBF) |
+| `sandwiched_cbf.py` | `SandwichedHOCBF` — forward CBF + coupled rear HOCBF combined filter |
 | `run_ego_rear.py` | Scenario 2 (ego + rear): one `--method` (baseline/bcbf/hocbf) per run, figure, registry, saved series |
 | `plot_runs.py` | independent comparison plotter (overlay saved runs via a JSON spec) |
 | `plot_accuracy_sweep.py` | statistics plotter for the `interaction_accuracy` sweep CSV |

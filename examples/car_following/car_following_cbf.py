@@ -59,13 +59,12 @@ class CarFollowingCBF1D:
         h = self.headway(x_ego, s_lead)
         return h - safe_distance(v_ego, v_lead, self.p)
 
-    def filter(self, u_nom: float, x_ego, s_lead: float, v_lead: float) -> float:
-        """Return the safe acceleration closest to u_nom.
+    def accel_upper_bound(self, x_ego, s_lead: float, v_lead: float) -> float:
+        """Forward CBF upper bound on the ego acceleration: the constraint is `a <= rhs`.
 
-        Args:
-            u_nom: nominal acceleration.
-            x_ego: ego state [s, v].
-            s_lead, v_lead: current lead position (center) and speed (= v1).
+        This is the raw CBF condition (worst-case lead decel `a1 = -a_l`) before the QP /
+        actuator clamp, exposed so a combined controller (e.g. the sandwiched front+rear
+        filter) can pair it with a separate lower bound. Also sets `last_h` (barrier b).
         """
         x = np.array(x_ego).flatten()
         v_ego = float(x[1])
@@ -77,7 +76,17 @@ class CarFollowingCBF1D:
         db_dv = max(db_dv, 1e-6)        # > 0 by construction; guard division
 
         # a <= rhs  (worst-case a1 = -a_l)
-        rhs = (self.gamma * b + (v_lead - v_ego) + db_dv1 * self.a_l) / db_dv
+        return (self.gamma * b + (v_lead - v_ego) + db_dv1 * self.a_l) / db_dv
+
+    def filter(self, u_nom: float, x_ego, s_lead: float, v_lead: float) -> float:
+        """Return the safe acceleration closest to u_nom.
+
+        Args:
+            u_nom: nominal acceleration.
+            x_ego: ego state [s, v].
+            s_lead, v_lead: current lead position (center) and speed (= v1).
+        """
+        rhs = self.accel_upper_bound(x_ego, s_lead, v_lead)
 
         a = cp.Variable()
         objective = cp.Minimize((a - u_nom) ** 2)
