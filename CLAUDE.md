@@ -23,13 +23,16 @@ safe_control (root)
 ├── utils/            — animation, geometry helpers
 └── examples/         — runnable demos
     ├── test_tracking.py
+    ├── run_registry.py  — shared run registry (dedup/save results; see below)
     ├── evade/
     ├── drift_car/
-    └── double_integrator/
-        ├── by_david/        — standalone DR-bCBF reference (not using framework)
-        ├── double_integrator_1d.py
-        ├── backup_cbf_1d_wrapper.py
-        └── run_backup_cbf_1d.py
+    ├── double_integrator/
+    │   ├── by_david/        — standalone DR-bCBF reference (not using framework)
+    │   ├── double_integrator_1d.py
+    │   ├── backup_cbf_1d_wrapper.py
+    │   └── run_backup_cbf_1d.py
+    ├── car_following/   — 1D longitudinal CBF (lead is exogenous; analytical STM)
+    └── rear_aware/      — ego + interactive rear follower (see below)
 ```
 
 Import style (from any script run at repo root):
@@ -108,6 +111,45 @@ S_max = { s>0 if v≥0,  s-v²/2≥0 if v<0 }
 S(T)  = { S_max conditions } AND v≥-T
 ```
 
+## Car-following & rear-aware examples (1D)
+
+`examples/car_following/` — ego follows a **lead** (exogenous signal, not in the dynamics).
+Reused models in `car_following_models.py`: `ovm_accel`, `_idm_accel` (via drifting_env),
+`nominal_accel(model, follower, leader, params)`. `CarFollowingCBF1D.filter` (exact CBF-QP,
+`car_following_safe_distance.py`) and `CarFollowingBackupCBF1D` (brake-to-stop, analytical
+nilpotent STM, lead enters only via the explicit `dh_dt`).
+
+`examples/rear_aware/` — ego with an **interactive rear follower** (the rear *reacts* to the
+ego, so it must enter the dynamics). Two scenarios, one controller per run:
+- `run_three_car.py` — lead → ego(forward CBF) → rear: shows the rear-end failure.
+- `run_ego_rear.py --method {baseline,bcbf,hocbf}` — ego + rear, no lead.
+  - `bcbf` = `RearEndBackupCBF1D` (`rear_backup_cbf.py`): **augments the state to
+    `[s_e,v_e,s_r,v_r]`** with the rear's reaction `a_rear(x)` folded into the drift `f`, so
+    the **rigorous flow STM comes from the base `BackupCBF._integrate_backup_trajectory`**
+    (no bespoke rollout / barrier finite-difference). Knobs: `--gamma`, `--gamma-terminal`,
+    `--backup-terminal/--no-backup-terminal`.
+  - `hocbf` = `CoupledRearCBF` (`coupled_rear_cbf.py`): analytic interaction-consistent
+    high-order CBF — a single lower bound on ego accel (no rollout, no QP). `--hocbf-a1/-a2`,
+    `--hocbf-robust-factor`.
+  - Ego nominal (`rear_aware_models.py`): `--ego-target {speed,stop}` (regulate to
+    `--v-desired`, or OVM/IDM stop at a virtual wall).
+
+Conventions (rear_aware): `config.json` stores only the **method-relevant** params (pruned),
+each run saves `series_<method>.npz`, and `results.json` carries QP/feasibility health via
+`qp_solver_stats` (`rear_aware_common.py`). `plot_runs.py` overlays runs from a JSON spec
+`{"output":..., "runs":{"label":"path"}}` (relative paths resolve against the example dir →
+spec dir → cwd) and prints a config-diff table; fixed 4-panel layout (h_r, v, a time series +
+an h_r–v phase portrait with OVM/IDM range-policy curves).
+
+### Run registry (`examples/run_registry.py`)
+
+Generic dedup/save: a run = a config dict under `output/run_NNN/` + a `register.csv` indexed
+by a config **fingerprint** (hash). `RunRegistry`: `find_match(cfg)`, `create_run(cfg)` (new
+folder), `overwrite_run(match, cfg)` (reuse folder in place), `commit(run, columns)`
+(replace-or-append the register row, **sorted by run index**). Run scripts expose `--force`
+(recompute into a new `run_NNN`, keeps the duplicate) vs `--override` (overwrite the matching
+`run_NNN` in place). `rear_aware_common.registry_run(reg, cfg, force, override)` wraps this.
+
 ## Shielding (`shielding/`)
 
 - `gatekeeper.py` — Gatekeeper: backward search over nominal horizon
@@ -136,3 +178,7 @@ Headway CBF applies to moving obstacles ahead in the same lane when `robot_spec[
 | `examples/drift_car/` | BackupCBF with LaneChange | DriftingCar |
 | `examples/double_integrator/run_backup_cbf_1d.py` | BackupCBF1D (analytical) | 1D custom |
 | `examples/double_integrator/by_david/` | DR-bCBF (disturbance-robust, standalone) | 1D |
+| `examples/car_following/run_car_following.py` | forward CBF / backup CBF (lead exogenous) | 1D |
+| `examples/rear_aware/run_ego_rear.py --method {baseline,bcbf,hocbf}` | augmented backup CBF / coupled HOCBF | 1D rear-aware |
+| `examples/rear_aware/run_three_car.py` | forward CBF (motivates rear-end failure) | 1D |
+| `examples/rear_aware/plot_runs.py <spec.json>` | overlay/compare saved runs (+ config diff) | — |
