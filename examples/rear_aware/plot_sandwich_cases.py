@@ -148,14 +148,25 @@ def main():
     ax_u.set_title('Ego acceleration (solid = filtered, thin dashed = nominal)')
     ax_u.grid(alpha=0.3); ax_u.legend(fontsize=8, ncol=2)
 
-    # panel 6: rear-aware braking authority a_e_eff vs time
-    for it in loaded:
-        if 'a_e_eff' in it['s']:
-            ax_a.plot(it['s']['t_ctrl'], it['s']['a_e_eff'], color=it['color'], lw=LW,
-                      label=it['label'])
-    ax_a.set_ylabel('a_e_eff [m/s^2]'); ax_a.set_xlabel('time [s]')
-    ax_a.set_title('Rear-aware braking authority fed to the forward CBF '
-                   '(smaller => ego hangs back more)')
+    # panel 6: HOCBF -> rear-aware braking authority a_e_eff; backup CBF -> rollout min-h
+    has_aee = any('a_e_eff' in it['s'] for it in loaded)
+    if has_aee:
+        for it in loaded:
+            if 'a_e_eff' in it['s']:
+                ax_a.plot(it['s']['t_ctrl'], it['s']['a_e_eff'], color=it['color'], lw=LW,
+                          label=it['label'])
+        ax_a.set_ylabel('a_e_eff [m/s^2]')
+        ax_a.set_title('Rear-aware braking authority fed to the forward CBF '
+                       '(smaller => ego hangs back more)')
+    else:
+        for it in loaded:
+            if 'h_min' in it['s']:
+                ax_a.plot(it['s']['t_ctrl'], it['s']['h_min'], color=it['color'], lw=LW,
+                          label=it['label'])
+        ax_a.axhline(0.0, color='red', ls='--', lw=1.2)
+        ax_a.set_ylabel('backup min-h [m]')
+        ax_a.set_title('Backup-rollout min barrier over the horizon (forward & rear)')
+    ax_a.set_xlabel('time [s]')
     ax_a.grid(alpha=0.3); ax_a.legend(fontsize=8, ncol=2)
 
     # phase A: forward gap h_f (y) vs ego speed v (x) -------------------------------

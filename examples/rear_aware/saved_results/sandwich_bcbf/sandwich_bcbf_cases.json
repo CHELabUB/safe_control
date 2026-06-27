@@ -1,0 +1,9 @@
+{
+  "output": "saved_results/sandwich_bcbf/compare_sandwich.png",
+  "runs": {
+    "passive (x0.0)":  "saved_results/sandwich_bcbf/run_001",
+    "under (x0.5)":    "saved_results/sandwich_bcbf/run_002",
+    "accurate (x1.0)": "saved_results/sandwich_bcbf/run_003",
+    "over (x2.5)":     "saved_results/sandwich_bcbf/run_004"
+  }
+}

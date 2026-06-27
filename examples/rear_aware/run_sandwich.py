@@ -36,6 +36,7 @@ from car_following_models import nominal_accel                     # noqa: E402
 from rear_aware_models import rear_accel                           # noqa: E402
 from run_three_car import build_lead_trace                         # noqa: E402
 from sandwiched_cbf import SandwichedHOCBF                         # noqa: E402
+from sandwiched_bcbf import SandwichedBackupCBF1D                  # noqa: E402
 from run_registry import RunRegistry                               # noqa: E402
 
 METHODS = ['sandwiched_hocbf', 'sandwiched_bcbf']
@@ -45,10 +46,15 @@ METHOD_STYLE = {'sandwiched_hocbf': ('sandwiched HOCBF', 'tab:blue'),
 
 def simulate_sandwich(cfg, dt, n_sim, method):
     """Lead (scripted, mild brake) -> ego (front+rear filter) -> rear (OVM, no filter)."""
-    if method != 'sandwiched_hocbf':
-        raise NotImplementedError(
-            f"method '{method}' not implemented yet (Stage B: the backup-CBF variant needs a "
-            "brake-behind-lead backup policy). Use --method sandwiched_hocbf.")
+    if method == 'sandwiched_hocbf':
+        return _simulate_hocbf(cfg, dt, n_sim)
+    if method == 'sandwiched_bcbf':
+        return _simulate_bcbf(cfg, dt, n_sim)
+    raise NotImplementedError(f"unknown method '{method}'")
+
+
+def _simulate_hocbf(cfg, dt, n_sim):
+    """Analytic combined forward-CBF ceiling + coupled rear-HOCBF floor (Stage A)."""
     L = L_COMBINED
     s_lead, v_lead = build_lead_trace(cfg['s_lead0'], n_sim, dt, cfg['lead'])
 
@@ -117,6 +123,112 @@ def simulate_sandwich(cfg, dt, n_sim, method):
     return out
 
 
+def _simulate_bcbf(cfg, dt, n_sim):
+    """Rear-aware backup CBF (Stage B): backup = follow-lead OVM + beta_f*(v_rear - v_ego)."""
+    L = L_COMBINED
+    s_lead, v_lead = build_lead_trace(cfg['s_lead0'], n_sim, dt, cfg['lead'])
+
+    p_safe = cfg['p_safe']
+    spec = {'model': 'DoubleIntegrator1D', 'u_max': cfg['u_acc'], 'a_max': cfg['u_acc'],
+            'v_max': p_safe['vbar'], 'body_length': BODY_LENGTH}
+    ego = DoubleIntegrator1D(dt, dict(spec))
+    rear = DoubleIntegrator1D(dt, dict(spec))
+
+    ctrl = SandwichedBackupCBF1D(
+        robot_spec=spec, p_safe=p_safe, dt=dt, backup_horizon=cfg['backup_horizon'],
+        a_e=cfg['u_acc'], u_acc=cfg['u_acc'],
+        L=L, d_min=cfg['d_min'], d_f=cfg['d_f'], beta_f=cfg['backup_beta_f'],
+        backup_ovm_params=cfg['backup_ovm'],
+        rear_model=cfg['rear_assumed_model'], rear_params=cfg['rear_assumed'],
+        gamma=cfg['gamma'], gamma_terminal=cfg.get('gamma_terminal', 2.0),
+        use_terminal=cfg.get('backup_terminal', False))
+
+    xe = np.array([s_lead[0] - L - cfg['gap_f0'], v_lead[0]])
+    xr = np.array([xe[0] - L - cfg['gap_r0'], v_lead[0]])
+
+    out = {k: np.zeros(n_sim + 1) for k in ('s_ego', 'v_ego', 's_rear', 'v_rear')}
+    for k in ('h_f', 'h_r', 'u_ego', 'u_nom', 'u_rear', 'h_min', 'backup_active',
+              'fwd_slack', 'rear_slack'):
+        out[k] = np.zeros(n_sim)
+    out['qp_status'] = []
+    out['s_ego'][0], out['v_ego'][0] = xe
+    out['s_rear'][0], out['v_rear'][0] = xr
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='.*Solution may be inaccurate.*')
+        for k in range(n_sim):
+            lead = {'x': s_lead[k], 'vx': v_lead[k], 'length': BODY_LENGTH}
+            ego_d = {'x': xe[0], 'vx': xe[1], 'length': BODY_LENGTH}
+            rear_d = {'x': xr[0], 'vx': xr[1], 'length': BODY_LENGTH}
+
+            u_nom = nominal_accel(cfg['ego_model'], ego_d, lead, cfg['ego_nom'])
+            ctrl.set_nominal_controller(
+                lambda X, ld=lead: np.array([[nominal_accel(
+                    cfg['ego_model'],
+                    {'x': float(X.flatten()[0]), 'vx': float(X.flatten()[1]),
+                     'length': BODY_LENGTH}, ld, cfg['ego_nom'])]]))
+            ctrl.set_lead_state(s_lead[k], v_lead[k])
+            ctrl.set_rear_state(xr[0], xr[1])
+            u_e = float(ctrl.solve_control_problem(np.array([xe[0], xe[1]])).flat[0])
+            out['qp_status'].append(ctrl.last_status)
+            u_e = max(u_e, -xe[1] / dt)
+
+            u_r = rear_accel(rear_d, ego_d, cfg['rear_model'], cfg['rear_actual'])
+            u_r = max(u_r, -xr[1] / dt)
+
+            out['h_f'][k] = (s_lead[k] - L) - xe[0]
+            out['h_r'][k] = (xe[0] - L) - xr[0]
+            out['u_ego'][k] = u_e
+            out['u_nom'][k] = u_nom
+            out['u_rear'][k] = u_r
+            out['h_min'][k] = ctrl._last_h_min
+            out['backup_active'][k] = float(ctrl._using_backup)
+            out['fwd_slack'][k] = ctrl.last_fwd_slack
+            out['rear_slack'][k] = ctrl.last_rear_slack
+
+            xe = np.array(ego.step(xe, np.array([[u_e]]))).flatten()
+            xe[1] = max(xe[1], 0.0)
+            xr = np.array(rear.step(xr, np.array([[u_r]]))).flatten()
+            xr[1] = max(xr[1], 0.0)
+            out['s_ego'][k + 1], out['v_ego'][k + 1] = xe
+            out['s_rear'][k + 1], out['v_rear'][k + 1] = xr
+
+    out['s_lead'], out['v_lead'] = s_lead, v_lead
+    return out
+
+
+def constraint_satisfaction_stats(fwd_slack, rear_slack, tol=1e-3):
+    """Soft-constraint relaxation tally for the sandwiched backup CBF.
+
+    Each per-step slack is the worst soft-constraint relaxation in its priority bucket
+    (forward = priority / RHO 1e5, rear = secondary / RHO 1e3). The slack sits on the CBF
+    *rate* condition (h_dot + alpha h >= 0) along the backup rollout -- NOT on h itself, so a
+    slack > tol relaxes the guaranteed decay rate; it is not a collision (the barrier values
+    min h_f / min h_r are reported separately). nan marks a QP-fallback (hard-brake) step.
+    Forward-priority is honored iff the high forward penalty keeps the forward slack
+    magnitude no larger than the rear's, so the rear bucket absorbs the sandwiched conflict.
+    """
+    fwd = np.asarray(fwd_slack, dtype=float)
+    rear = np.asarray(rear_slack, dtype=float)
+    fb = np.isnan(fwd) | np.isnan(rear)
+    fwd_v = (fwd > tol) & ~fb
+    rear_v = (rear > tol) & ~fb
+
+    def _stats(arr, mask):
+        clean = arr[~fb]
+        return {'relaxed_steps': int(mask.sum()),
+                'max_slack': float(np.max(clean)) if clean.size else 0.0,
+                'mean_slack_when_relaxed': float(arr[mask].mean()) if mask.any() else 0.0}
+
+    fp, rs = _stats(fwd, fwd_v), _stats(rear, rear_v)
+    return {'total_steps': int(fwd.size), 'tol': tol, 'fallback_steps': int(fb.sum()),
+            'forward_priority': fp, 'rear_secondary': rs,
+            'fwd_to_rear_slack_ratio': (fp['max_slack'] / rs['max_slack']
+                                        if rs['max_slack'] > 0 else 0.0),
+            'priority_respected': bool(fp['max_slack'] <= rs['max_slack'] + tol)}
+
+
 def make_figure(method, out, cfg, t_state, t_ctrl, save_dir, footnote):
     fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
     axp, axg, axv, axu = axes
@@ -141,9 +253,12 @@ def make_figure(method, out, cfg, t_state, t_ctrl, save_dir, footnote):
 
     axu.plot(t_ctrl, out['u_nom'], color='gray', lw=LW * 0.8, ls=':', label='ego nominal')
     axu.plot(t_ctrl, out['u_ego'], color=c, lw=LW, label=f'ego ({tag})')
-    axu.plot(t_ctrl, out['rhs_f'], color='tab:blue', lw=1.2, ls='--', label='forward ceiling rhs_f')
-    axu.plot(t_ctrl, out['lb_r'], color='tab:orange', lw=1.2, ls='--', label='rear floor lb_r')
-    axu.plot(t_ctrl, -out['a_e_eff'], color='tab:red', lw=1.2, ls='-.', label='-a_e_eff (rear-aware brake)')
+    if method == 'sandwiched_hocbf':
+        axu.plot(t_ctrl, out['rhs_f'], color='tab:blue', lw=1.2, ls='--', label='forward ceiling rhs_f')
+        axu.plot(t_ctrl, out['lb_r'], color='tab:orange', lw=1.2, ls='--', label='rear floor lb_r')
+        axu.plot(t_ctrl, -out['a_e_eff'], color='tab:red', lw=1.2, ls='-.', label='-a_e_eff (rear-aware brake)')
+    else:
+        axu.plot(t_ctrl, out['h_min'], color='tab:red', lw=1.2, ls='-.', label='backup min-h (fwd&rear)')
     axu.set_ylabel('ego accel [m/s^2]'); axu.set_xlabel('time [s]'); axu.set_title('Ego control + bounds')
     axu.legend(ncol=2, fontsize=9); axu.grid(alpha=0.3)
 
@@ -176,7 +291,7 @@ def build_cfg(args, method=None):
                      ('kappa', args.assumed_rear_kappa), ('a_e', args.assumed_rear_a_decel)]:
         if val is not None:
             rear_assumed[key] = val
-    return {
+    cfg = {
         'scenario': 'sandwich', 'method': method, 'ego_model': args.ego_model,
         's_lead0': 60.0, 'gap_f0': args.gap_f0, 'gap_r0': resolve(args.gap_r0, 6.0),
         'd_min': args.d_min, 'u_acc': args.u_acc, 'gamma': args.gamma,
@@ -186,11 +301,21 @@ def build_cfg(args, method=None):
         'rear_model': args.rear_model, 'rear_actual': rear_actual,
         'rear_assumed_model': resolve(args.assumed_rear_model, args.rear_model),
         'rear_assumed': rear_assumed,
-        'hocbf_a1': args.hocbf_a1, 'hocbf_a2': args.hocbf_a2,
-        'hocbf_robust_factor': args.hocbf_robust_factor,
-        'couple_a_e_eff': not args.no_couple_a_e_eff,
-        'a_e_eff_min': args.a_e_eff_min,
     }
+    if method == 'sandwiched_hocbf':
+        cfg.update({'hocbf_a1': args.hocbf_a1, 'hocbf_a2': args.hocbf_a2,
+                    'hocbf_robust_factor': args.hocbf_robust_factor,
+                    'couple_a_e_eff': not args.no_couple_a_e_eff,
+                    'a_e_eff_min': args.a_e_eff_min})
+    elif method == 'sandwiched_bcbf':
+        cfg.update({'d_f': args.d_f, 'backup_horizon': args.backup_horizon,
+                    'backup_beta_f': args.backup_beta_f,
+                    'gamma_terminal': args.gamma_terminal,
+                    'backup_terminal': not args.no_backup_terminal,
+                    'backup_ovm': {'alpha': args.backup_alpha, 'beta': args.backup_beta,
+                                   'kappa': args.backup_kappa, 'h_st': args.backup_hst,
+                                   'v_max': args.lead_v_cruise + 3.0}})
+    return cfg
 
 
 def build_parser():
@@ -221,6 +346,21 @@ def build_parser():
     p.add_argument('--hocbf-a1', type=float, default=1.0)
     p.add_argument('--hocbf-a2', type=float, default=1.0)
     p.add_argument('--hocbf-robust-factor', type=float, default=1.0)
+    # Backup CBF (Stage B): rear-aware OVM backup + forward/rear barriers along the rollout.
+    p.add_argument('--backup-horizon', type=float, default=6.0)
+    p.add_argument('--backup-beta-f', type=float, default=1.0,
+                   help='rear-aware softening gain beta_f in the backup OVM (the key knob)')
+    p.add_argument('--backup-alpha', type=float, default=0.6, help='backup OVM follow-lead alpha')
+    p.add_argument('--backup-beta', type=float, default=0.5, help='backup OVM follow-lead beta')
+    p.add_argument('--backup-kappa', type=float, default=0.5)
+    p.add_argument('--backup-hst', type=float, default=5.0)
+    p.add_argument('--d-f', type=float, default=0.5, help='forward collision margin (backup CBF)')
+    p.add_argument('--gamma-terminal', type=float, default=2.0)
+    p.add_argument('--no-backup-terminal', action='store_true',
+                   help='drop the terminal gap constraints (default: terminals off)',
+                   default=True)
+    p.add_argument('--backup-terminal', dest='no_backup_terminal', action='store_false',
+                   help='enable the terminal gap constraints')
     # Rear-aware forward CBF (a_e_eff coupling).
     p.add_argument('--no-couple-a-e-eff', action='store_true',
                    help='disable a_e_eff coupling (naive fixed-a_e front-ceiling/rear-floor clip)')
@@ -267,18 +407,36 @@ def main():
     save_run_series(run.path, method, t_state, t_ctrl, out)
 
     min_hf, min_hr = float(out['h_f'].min()), float(out['h_r'].min())
-    conflict_frac = float(np.mean(out['conflict']))
     mismatch = bool(cfg['rear_assumed'] != cfg['rear_actual']
                     or cfg['rear_assumed_model'] != cfg['rear_model'])
     print(f"  min h_f = {min_hf:7.3f} m ({'SAFE' if min_hf > 0 else 'FRONT-COLLIDE'} vs lead)")
     print(f"  min h_r = {min_hr:7.3f} m ({'rear-end!' if min_hr <= 0 else 'safe'} from rear)")
-    print(f"  conflict fraction = {conflict_frac:.3f}  (steps where rear floor > forward ceiling)")
 
     status_stats = qp_solver_stats(out['qp_status'])
     results = {'method': method, 'param_mismatch': mismatch,
                'min_h_f': min_hf, 'min_h_r': min_hr,
                'front_collision': bool(min_hf <= 0), 'rear_end': bool(min_hr <= 0),
-               'conflict_fraction': conflict_frac, 'status_stats': status_stats}
+               'status_stats': status_stats}
+    if 'conflict' in out:                       # HOCBF-only diagnostic
+        conflict_frac = float(np.mean(out['conflict']))
+        results['conflict_fraction'] = conflict_frac
+        print(f"  conflict fraction = {conflict_frac:.3f}  (rear floor > forward ceiling)")
+    else:                                       # bcbf: backup usage + constraint satisfaction
+        backup_frac = float(np.mean(out['backup_active']))
+        results['backup_fraction'] = backup_frac
+        csat = constraint_satisfaction_stats(out['fwd_slack'], out['rear_slack'])
+        results['constraint_satisfaction'] = csat
+        fp, rs = csat['forward_priority'], csat['rear_secondary']
+        usable = status_stats['total_steps'] - status_stats['num_infeasible'] - status_stats['num_failure']
+        print(f"  backup-active fraction = {backup_frac:.3f}")
+        print(f"  QP status: optimal/usable={usable}  infeasible={status_stats['num_infeasible']}"
+              f"  failure={status_stats['num_failure']}  fallback(hard-brake)={csat['fallback_steps']}")
+        print(f"  CBF-rate relaxations (slack > {csat['tol']:g}) over {csat['total_steps']} steps:")
+        print(f"    forward (priority)  : {fp['relaxed_steps']:3d} steps  max slack {fp['max_slack']:.2e}")
+        print(f"    rear    (secondary) : {rs['relaxed_steps']:3d} steps  max slack {rs['max_slack']:.2e}")
+        print(f"    fwd/rear max-slack ratio = {csat['fwd_to_rear_slack_ratio']:.2f}  "
+              f"-> forward priority {'respected' if csat['priority_respected'] else 'VIOLATED'}"
+              f" (forward kept tighter)")
     with open(os.path.join(run.path, 'results.json'), 'w') as fh:
         json.dump(results, fh, indent=2)
 
