@@ -1,0 +1,82 @@
+{
+  "scenario": "sandwich",
+  "method": "sandwiched_bcbf",
+  "ego_model": "ovm",
+  "s_lead0": 60.0,
+  "gap_f0": 14.0,
+  "gap_r0": 4.5,
+  "d_min": 1.0,
+  "u_acc": 3.0,
+  "gamma": 2.0,
+  "p_safe": {
+    "tau": 1.0,
+    "a_e": 3.0,
+    "a_l": 1.5,
+    "vbar": 13.0
+  },
+  "lead": {
+    "v_cruise": 10.0,
+    "t_cruise": 3.0,
+    "a_brake": 1.5,
+    "t_hold_dur": 4.0,
+    "a_accel": 2.0
+  },
+  "ego_nom": {
+    "alpha": 0.8,
+    "beta": 0.5,
+    "kappa": 1.0,
+    "h_st": 1.0,
+    "v0": 10.0,
+    "v_max": 10.0,
+    "a_max": 3.0,
+    "a_e": 3.0,
+    "T": 0.4,
+    "s0": 1.0,
+    "b_comfort": 2.0
+  },
+  "rear_model": "ovm",
+  "rear_actual": {
+    "alpha": 0.4,
+    "beta": 0.28,
+    "kappa": 0.7,
+    "h_st": 2.0,
+    "v0": 10.0,
+    "v_max": 10.0,
+    "a_max": 2.0,
+    "a_e": 2.5,
+    "T": 1.0,
+    "s0": 2.0,
+    "b_comfort": 2.0
+  },
+  "rear_assumed_model": "ovm",
+  "rear_assumed": {
+    "alpha": 0.32,
+    "beta": 0.224,
+    "kappa": 0.7,
+    "h_st": 2.0,
+    "v0": 10.0,
+    "v_max": 10.0,
+    "a_max": 2.0,
+    "a_e": 2.5,
+    "T": 1.0,
+    "s0": 2.0,
+    "b_comfort": 2.0
+  },
+  "d_f": 0.5,
+  "backup_horizon": 6.0,
+  "backup_beta_f": 1.0,
+  "gamma_terminal": 2.0,
+  "backup_terminal": false,
+  "backup_ovm": {
+    "alpha": 0.6,
+    "beta": 0.5,
+    "kappa": 0.5,
+    "h_st": 5.0,
+    "v_max": 13.0
+  },
+  "l_inter_ratio": 4.0,
+  "l_inter_residue": 0.5,
+  "param_mismatch": 0.13600000000000004,
+  "rear_buffer": 1.044,
+  "rho_rear": 30000.0
+}
