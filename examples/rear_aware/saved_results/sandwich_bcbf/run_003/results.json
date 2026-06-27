@@ -19,6 +19,12 @@
     "healthy": true
   },
   "backup_fraction": 0.5525,
+  "param_mismatch_mag": 0.0,
+  "rear_buffer": 0.0,
+  "l_inter_ratio": 0.0,
+  "l_inter_residue": 0.0,
+  "rear_clears_dmin": false,
+  "control_effort_integral": 25.259464407861262,
   "constraint_satisfaction": {
     "total_steps": 400,
     "tol": 0.001,

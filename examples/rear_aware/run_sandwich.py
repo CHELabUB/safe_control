@@ -140,8 +140,10 @@ def _simulate_bcbf(cfg, dt, n_sim):
         L=L, d_min=cfg['d_min'], d_f=cfg['d_f'], beta_f=cfg['backup_beta_f'],
         backup_ovm_params=cfg['backup_ovm'],
         rear_model=cfg['rear_assumed_model'], rear_params=cfg['rear_assumed'],
+        rear_buffer=cfg.get('rear_buffer', 0.0),
         gamma=cfg['gamma'], gamma_terminal=cfg.get('gamma_terminal', 2.0),
         use_terminal=cfg.get('backup_terminal', False))
+    ctrl.rho_rear = cfg.get('rho_rear', ctrl.rho_rear)   # ISSf needs the rear promoted to bite
 
     xe = np.array([s_lead[0] - L - cfg['gap_f0'], v_lead[0]])
     xr = np.array([xe[0] - L - cfg['gap_r0'], v_lead[0]])
@@ -315,6 +317,19 @@ def build_cfg(args, method=None):
                     'backup_ovm': {'alpha': args.backup_alpha, 'beta': args.backup_beta,
                                    'kappa': args.backup_kappa, 'h_st': args.backup_hst,
                                    'v_max': args.lead_v_cruise + 3.0}})
+        # ISSf rear margin: inflate d_min by L_inter*|dparam| + residue, |dparam| the
+        # assumed-vs-actual alpha+beta mismatch (the disturbance the assumed model carries).
+        # Only recorded when active, so margin-off configs/fingerprints match the pre-ISSf runs.
+        issf_active = (args.l_inter_ratio != 0.0 or args.l_inter_residue != 0.0
+                       or args.rho_rear != 1e3)
+        if issf_active:
+            param_mismatch = (abs(rear_assumed['alpha'] - rear_actual['alpha'])
+                              + abs(rear_assumed['beta'] - rear_actual['beta']))
+            cfg.update({'l_inter_ratio': args.l_inter_ratio,
+                        'l_inter_residue': args.l_inter_residue,
+                        'param_mismatch': param_mismatch,
+                        'rear_buffer': args.l_inter_ratio * param_mismatch + args.l_inter_residue,
+                        'rho_rear': args.rho_rear})
     return cfg
 
 
@@ -355,6 +370,16 @@ def build_parser():
     p.add_argument('--backup-kappa', type=float, default=0.5)
     p.add_argument('--backup-hst', type=float, default=5.0)
     p.add_argument('--d-f', type=float, default=0.5, help='forward collision margin (backup CBF)')
+    # ISSf error margin on the rear barrier: rear_buffer = l_inter_ratio*|dparam| + l_inter_residue,
+    # where |dparam| = |alpha_assume-alpha_actual| + |beta_assume-beta_actual| (opt-in; 0 = off).
+    p.add_argument('--l-inter-ratio', type=float, default=0.0,
+                   help='ISSf rear-margin gain L_inter (m per unit alpha+beta mismatch); 0 = off')
+    p.add_argument('--l-inter-residue', type=float, default=0.0,
+                   help='ISSf rear-margin constant residue L_inter_residue [m]; 0 = off')
+    p.add_argument('--rho-rear', type=float, default=1e3,
+                   help='rear soft-constraint penalty (authority). Default 1e3 keeps the rear '
+                        'secondary (forward 1e5); the ISSf margin only bites once the rear '
+                        'constraint is promoted (e.g. 3e4) so it can shape the brake.')
     p.add_argument('--gamma-terminal', type=float, default=2.0)
     p.add_argument('--no-backup-terminal', action='store_true',
                    help='drop the terminal gap constraints (default: terminals off)',
@@ -424,10 +449,23 @@ def main():
     else:                                       # bcbf: backup usage + constraint satisfaction
         backup_frac = float(np.mean(out['backup_active']))
         results['backup_fraction'] = backup_frac
+        # ISSf margin diagnostics + control-effort cost (the narrative's performance metric).
+        effort = float(np.sum(np.abs(out['u_ego'] - out['u_nom'])) * dt)
+        results.update({'param_mismatch_mag': float(cfg.get('param_mismatch', 0.0)),
+                        'rear_buffer': float(cfg.get('rear_buffer', 0.0)),
+                        'l_inter_ratio': float(cfg.get('l_inter_ratio', 0.0)),
+                        'l_inter_residue': float(cfg.get('l_inter_residue', 0.0)),
+                        'rear_clears_dmin': bool(min_hr > cfg['d_min']),
+                        'control_effort_integral': effort})
         csat = constraint_satisfaction_stats(out['fwd_slack'], out['rear_slack'])
         results['constraint_satisfaction'] = csat
         fp, rs = csat['forward_priority'], csat['rear_secondary']
         usable = status_stats['total_steps'] - status_stats['num_infeasible'] - status_stats['num_failure']
+        print(f"  rear ISSf buffer = {results['rear_buffer']:.3f} m  "
+              f"(mismatch |dα|+|dβ|={results['param_mismatch_mag']:.3f}, "
+              f"L_inter={results['l_inter_ratio']:g}, residue={results['l_inter_residue']:g})")
+        print(f"  rear clears d_min ({cfg['d_min']}): {results['rear_clears_dmin']}  "
+              f"|  control effort integral(|u-u_nom| dt) = {effort:.3f}")
         print(f"  backup-active fraction = {backup_frac:.3f}")
         print(f"  QP status: optimal/usable={usable}  infeasible={status_stats['num_infeasible']}"
               f"  failure={status_stats['num_failure']}  fallback(hard-brake)={csat['fallback_steps']}")

@@ -90,17 +90,19 @@ def main():
     # Report how the runs' configs differ (read straight from config.json).
     print_config_diffs(loaded)
 
-    # ---- layout: 6 stacked time series (left) + 2 phase portraits (right) -----------
-    fig = plt.figure(figsize=(15, 18))
-    gs = fig.add_gridspec(6, 2, width_ratios=[1.0, 1.2], hspace=0.4, wspace=0.2)
+    # ---- layout: 8 stacked time series (left) + 2 phase portraits (right) -----------
+    fig = plt.figure(figsize=(16, 25))
+    gs = fig.add_gridspec(8, 2, width_ratios=[1.0, 1.2], hspace=0.6, wspace=0.2)
     ax_f = fig.add_subplot(gs[0, 0])
     ax_r = fig.add_subplot(gs[1, 0], sharex=ax_f)
     ax_v = fig.add_subplot(gs[2, 0], sharex=ax_f)
     ax_vr = fig.add_subplot(gs[3, 0], sharex=ax_f)
     ax_u = fig.add_subplot(gs[4, 0], sharex=ax_f)
     ax_a = fig.add_subplot(gs[5, 0], sharex=ax_f)
-    ax_pv = fig.add_subplot(gs[0:3, 1])     # phase A: h_f vs ego speed
-    ax_ph = fig.add_subplot(gs[3:6, 1])     # phase B: h_f vs rear gap
+    ax_dev = fig.add_subplot(gs[6, 0], sharex=ax_f)    # |u - u_nom| profile
+    ax_bar = fig.add_subplot(gs[7, 0])                 # integral bar chart (x = case)
+    ax_pv = fig.add_subplot(gs[0:4, 1])     # phase A: h_f vs ego speed
+    ax_ph = fig.add_subplot(gs[4:8, 1])     # phase B: h_f vs rear gap
 
     # panel 1: forward gap h_f vs time
     for it in loaded:
@@ -110,16 +112,21 @@ def main():
     ax_f.set_title('Forward gap to lead (stays > 0 => forward-safe)')
     ax_f.grid(alpha=0.3); ax_f.legend(fontsize=8, ncol=2)
 
-    # panel 2: rear gap h_r vs time (label carries min h_r)
+    # panel 2: rear gap h_r vs time (label carries min h_r vs d_min: clears / BELOW)
     for it in loaded:
         hr = it['s']['h_r']
+        hr_min = float(hr.min())
+        if d_min is not None:
+            verdict = 'clears' if hr_min > d_min else 'BELOW d_min'
+        else:
+            verdict = 'rear-end' if hr_min <= 0 else 'safe'
         ax_r.plot(it['s']['t_ctrl'], hr, color=it['color'], lw=LW,
-                  label=f"{it['label']}  (min={float(hr.min()):.2f})")
+                  label=f"{it['label']}  (min={hr_min:.2f}, {verdict})")
     ax_r.axhline(0.0, color='red', ls='--', lw=1.5, label='collision (h_r=0)')
     if d_min is not None:
         ax_r.axhline(d_min, color='k', ls='--', lw=1.5, label=f'd_min={d_min}')
     ax_r.set_ylabel('rear gap h_r [m]')
-    ax_r.set_title('Rear gap (dips < 0 => rear-ended)')
+    ax_r.set_title('Rear gap (target: min stays above d_min)')
     ax_r.grid(alpha=0.3); ax_r.legend(fontsize=8, ncol=2)
 
     # panel 3: ego velocity vs time (per case) + the shared lead profile (black solid)
@@ -166,8 +173,34 @@ def main():
         ax_a.axhline(0.0, color='red', ls='--', lw=1.2)
         ax_a.set_ylabel('backup min-h [m]')
         ax_a.set_title('Backup-rollout min barrier over the horizon (forward & rear)')
-    ax_a.set_xlabel('time [s]')
     ax_a.grid(alpha=0.3); ax_a.legend(fontsize=8, ncol=2)
+
+    # panel 7: control deviation from nominal |u - u_nom| vs time (intervention effort)
+    efforts = []
+    for it in loaded:
+        u, un, t = it['s']['u_ego'], it['s']['u_nom'], it['s']['t_ctrl']
+        dev = np.abs(u - un)
+        dt = float(t[1] - t[0]) if len(t) > 1 else 1.0
+        efforts.append(float(np.sum(dev) * dt))
+        ax_dev.plot(t, dev, color=it['color'], lw=LW,
+                    label=f"{it['label']}  (∫={efforts[-1]:.1f})")
+    ax_dev.set_ylabel('|u - u_nom| [m/s^2]')
+    ax_dev.set_xlabel('time [s]')
+    ax_dev.set_title('Control deviation from nominal (intervention effort)')
+    ax_dev.grid(alpha=0.3); ax_dev.legend(fontsize=8, ncol=2)
+
+    # panel 8: bar chart of the per-case effort integral (accurate should be smallest)
+    labels = [it['label'] for it in loaded]
+    colors = [it['color'] for it in loaded]
+    xs = np.arange(len(loaded))
+    ax_bar.bar(xs, efforts, color=colors, alpha=0.85)
+    for x, e in zip(xs, efforts):
+        ax_bar.text(x, e, f'{e:.1f}', ha='center', va='bottom', fontsize=8)
+    ax_bar.set_xticks(xs)
+    ax_bar.set_xticklabels(labels, rotation=20, ha='right', fontsize=8)
+    ax_bar.set_ylabel('∫|u - u_nom| dt')
+    ax_bar.set_title('Total control intervention per case (lower = closer to nominal)')
+    ax_bar.grid(alpha=0.3, axis='y')
 
     # phase A: forward gap h_f (y) vs ego speed v (x) -------------------------------
     hf_all = np.concatenate([it['s']['h_f'] for it in loaded])

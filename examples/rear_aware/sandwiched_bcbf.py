@@ -69,7 +69,7 @@ class SandwichedBackupCBF1D(BackupCBF):
     def __init__(self, robot_spec, p_safe, dt=0.05, backup_horizon=6.0,
                  a_e=3.0, u_acc=3.0, L=4.5, d_min=1.0, d_f=0.5,
                  beta_f=0.5, backup_ovm_params=None,
-                 rear_model='ovm', rear_params=None,
+                 rear_model='ovm', rear_params=None, rear_buffer=0.0,
                  gamma=1.0, gamma_terminal=2.0, use_terminal=False, ax=None):
         """
         Args:
@@ -83,6 +83,11 @@ class SandwichedBackupCBF1D(BackupCBF):
                 follow-the-lead part of the backup (moderate following law by default).
             rear_model, rear_params: the ego's ASSUMED model of the rear (may be wrong);
                 folded into the augmented dynamics.
+            rear_buffer: ISSf error margin (>=0) added to the rear collision margin d_min, so
+                the rear barrier is h_r = (s_e - L) - s_r - d_min - rear_buffer. The driver
+                sizes it from the assumed-vs-actual model mismatch (L_inter * |dparam| + residue):
+                a larger mismatch inflates the rear gap the filter insists on, re-tightening an
+                otherwise over-permissive rollout barrier (see run_sandwich.py).
             gamma, gamma_terminal: class-K gains. use_terminal: include the gap terminals.
         """
         self.p_safe = dict(p_safe)
@@ -93,6 +98,7 @@ class SandwichedBackupCBF1D(BackupCBF):
         self.d_min = float(d_min)
         self.d_f = float(d_f)
         self.beta_f = float(beta_f)
+        self.rear_buffer = float(rear_buffer)
         self.backup_ovm = dict(backup_ovm_params or
                                {'alpha': 0.6, 'beta': 0.5, 'kappa': 0.5,
                                 'h_st': 5.0, 'v_max': 13.0})
@@ -112,6 +118,8 @@ class SandwichedBackupCBF1D(BackupCBF):
         self.alpha_terminal = float(gamma_terminal)
         self.use_terminal = bool(use_terminal)
         self.u_b = -self.a_e                        # QP fallback = hard brake (forward-priority)
+        # Soft-QP penalties (tunable): forward = priority, rear = secondary, terminals.
+        self.rho_fwd, self.rho_rear, self.rho_term = 1e5, 1e3, 1e1
         self._rear0 = (0.0, 0.0)
         self._lead0 = (1e6, 0.0)                    # (s_lead, v_lead) captured each step
         self._rear_s = self._rear_v = None
@@ -164,7 +172,7 @@ class SandwichedBackupCBF1D(BackupCBF):
 
     def _h_rear(self, x):
         xf = np.array(x).flatten()
-        return (xf[0] - self.L) - xf[2] - self.d_min
+        return (xf[0] - self.L) - xf[2] - self.d_min - self.rear_buffer
 
     _GRAD_REAR = np.array([1.0, 0.0, -1.0, 0.0])
     _GRAD_FWD_S = np.array([-1.0, 0.0, 0.0, 0.0])           # position part of grad h_f
@@ -276,7 +284,7 @@ class SandwichedBackupCBF1D(BackupCBF):
                                            - self._alpha_terminal(hT))))
 
         # Forward-priority: forward safety slack penalized far more than the rear's.
-        RHO_FWD, RHO_REAR, RHO_TERM = 1e5, 1e3, 1e1
+        RHO_FWD, RHO_REAR, RHO_TERM = self.rho_fwd, self.rho_rear, self.rho_term
         status = 'no_constraints'
         # (name, constraints, penalty, priority-bucket): priority = forward, secondary = rear.
         group_specs = [('fwd', fwd, RHO_FWD, 'fwd'), ('rear', rear, RHO_REAR, 'rear'),
