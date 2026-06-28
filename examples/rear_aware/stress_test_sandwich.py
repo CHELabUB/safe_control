@@ -320,6 +320,7 @@ def plot_aggregated(agg, out_png, use_tex=True):
     slot = 0.19          # center-to-center spacing of the 4 group bars (< 1 metric slot)
     bw = 0.155           # bar width (< slot -> small visible gap between bars)
     refs = []
+    bar_tops = []                                          # rel+std per bar, for auto y-limit
     for mi, (m, _long, short) in enumerate(metrics):
         means = {g: groups[g][m]['mean'] for g in ORDER if g in groups}
         ref_g = max(means, key=means.get)                 # the "largest group" for this metric
@@ -330,20 +331,19 @@ def plot_aggregated(agg, out_png, use_tex=True):
                 continue
             rel = groups[grp][m]['mean'] / ref if ref else 0.0
             relstd = groups[grp][m]['std'] / abs(ref) if ref else 0.0
+            bar_tops.append(rel + relstd)
             xpos = mi + (gi - 1.5) * slot
-            ax3.bar(xpos, rel, bw, yerr=relstd, capsize=2, color=GROUP_COLORS[grp],
-                    alpha=0.85, label=grp if mi == 0 else None)
-            ax3.text(xpos, rel + relstd + 0.015, f'{rel:.2f}', ha='center', va='bottom',
-                     fontsize=NUM_FS)
+            ax3.bar(xpos, rel, bw, yerr=relstd, capsize=2, color=GROUP_COLORS[grp], alpha=0.85)
+            ax3.text(xpos, rel + relstd + 0.015, f'{rel:.2f}', ha='center',
+                     va='bottom', fontsize=NUM_FS)
     ax3.axhline(1.0, color='gray', ls=':', lw=1.0)
     ax3.set_xticks(range(len(metrics)))
     ax3.set_xticklabels([_long for _, _long, _ in metrics], fontsize=LBL_FS)
     ax3.set_ylabel('relative to largest group (=1.0)', fontsize=LBL_FS)
-    ax3.set_ylim(0, 1.32)
+    ax3.set_ylim(0, max(1.32, max(bar_tops) + 0.12))       # headroom for the value labels
     ax3.set_title('Per-group metrics, each normalized to the largest group   ('
                   + ',   '.join(refs) + ')', fontsize=TTL_FS)
-    ax3.legend(fontsize=LEG_FS, ncol=4, loc='upper center')
-    ax3.grid(alpha=0.3, axis='y')
+    ax3.grid(alpha=0.3, axis='y')   # group colors are keyed by the header; no per-panel legend
 
     # ---- color-coded group descriptions as an extended title (top of the figure) ----
     handles = [Line2D([0], [0], marker='o', color='w', markerfacecolor=GROUP_COLORS[g],

@@ -195,43 +195,169 @@ uv run python examples/rear_aware/run_ego_rear.py --method bcbf --assumed-rear-a
 uv run python examples/rear_aware/plot_runs.py examples/rear_aware/temp_representative/compare_spec.json
 ```
 
-**Saved results:**
-- [`saved_results/ego_rear_interaction_accuracy_stats/`](saved_results/ego_rear_interaction_accuracy_stats/)
-  — sweep CSV + statistics figure `accuracy_sweep.png` (safety flat & safe; `t_settle` /
-  `v_offset` / intervention degrade as the assumed model gets more conservative).
-- [`saved_results/ego_rear_interactive_compare/`](saved_results/ego_rear_interactive_compare/)
-  — five representative runs (`baseline`, `passive`, `under`, `accurate`, `over`) with the
-  behavior overlay `compare_runs.png` and the `compare_spec.json` that produced it.
+**Saved results:** the statistics sweep
+[`ego_rear_interaction_accuracy_stats/`](saved_results/ego_rear_interaction_accuracy_stats/)
+(`accuracy_sweep.png` + CSV) and the five-run behavior overlay
+[`ego_rear_interactive_compare/`](saved_results/ego_rear_interactive_compare/)
+(`compare_runs.png`, from `compare_spec.json`). Both — with their reproduce commands — are indexed
+in the [Saved results catalog](#saved-results-catalog) below.
 
-## Scenario 3 — `sandwich` (combined front + rear) — *in progress*
+## Scenario 3 — `sandwich` (combined front + rear)
 
-The end goal: the ego **between** a lead and a follower, enforcing `h_f >= 0` and `h_r >= 0`
-together. This is the scenario where the **interaction-model accuracy decides *safety***, unlike
-the no-lead `ego_rear` above (where the forward escape makes the filter robust to mismatch and
-only *performance* degrades). Because the ego cannot escape forward, over-trusting the rear's
-responsiveness should cause a rear-end.
+The ego **between** a lead and a follower, enforcing `h_f >= 0` (don't hit the lead) and
+`h_r >= 0` (don't get rear-ended) together. Because the ego **cannot escape forward**, this is the
+scenario where **interaction-model accuracy decides *safety*** — unlike the no-lead `ego_rear`
+above, where the forward escape makes the filter robust to mismatch and only *performance*
+degrades. The ego nominal is deliberately aggressive (tailgating; brakes late/hard). Two
+controllers solve it (an analytic HOCBF and a backup CBF), plus an ISSf robustness margin and a
+Monte-Carlo stress test. Driver: `run_sandwich.py --method {sandwiched_hocbf,sandwiched_bcbf}`.
 
-**Controller** (`sandwiched_cbf.py`, driver `run_sandwich.py`). A forward CBF vs the lead (upper
-bound on accel, `CarFollowingCBF1D`) combined with a coupled rear HOCBF (lower bound,
-`CoupledRearCBF`, using the ego's *assumed* rear model), resolved **forward-first** on conflict
-(never hit the lead). The ego nominal is deliberately aggressive (tailgating; brakes late/hard).
+> A naive front-ceiling / rear-floor clip is **not** enough: the rear floor only limits braking
+> *reactively*, so the ego tailgates to the forward boundary and then brakes hard *regardless of
+> the rear model* — accurate and over-estimate rear-end identically. The fix in both controllers
+> is to make the ego **proactively hang back** by an amount that depends on the assumed rear.
 
-**Finding so far — a naive front-ceiling / rear-floor clip is *not* enough.** With the aggressive
-nominal, the accurate and over-estimated models rear-end **identically** (`min h_r ≈ −3.3`,
-`conflict_fraction ≈ 0.44`): the ego tailgates to the forward boundary (`min h_f ≈ 0`), so when
-the lead brakes the forward CBF demands a hard brake *regardless of the rear model*. The rear
-floor only limits braking **reactively** — it never stopped the ego from tailgating, so the
-accurate model cannot help. Inherent tension: the brake must be hard enough for the rear floor
-to bind (⇒ tailgating ⇒ forward conflict), **unless the ego proactively hangs back**.
+### Stage A — analytic HOCBF (`sandwiched_cbf.py`, `--method sandwiched_hocbf`)
 
-**Fix being implemented — a rear-aware forward CBF.** The ego plans to brake only at a rate the
-rear can survive: compute `a_e_eff` = the largest ego deceleration for which the *assumed* rear
-keeps `h_r >= d_min`, and feed that **reduced** braking authority into the forward CBF's
-safe-distance. Accurate (sluggish) rear → small `a_e_eff` → larger forward gap → ego hangs back →
-safe; over-estimate → large `a_e_eff` → tailgates → the real sluggish rear is hit. This couples
-the rear `α, β` to the forward gap (so the accuracy sweep drives it) and yields the proactive
-"prepare for a sudden stop" behaviour. (The backup-CBF variant, which needs a brake-behind-lead
-backup policy, is a later stage.)
+Forward CBF vs the lead + coupled rear HOCBF (ego's *assumed* rear model), resolved
+**forward-first**. The key coupling is `a_e_eff` — the largest ego deceleration for which the
+assumed rear keeps `h_r >= d_min` — fed into the forward safe-distance, so the ego hangs back
+proactively. Accurate (sluggish) rear → small `a_e_eff` → larger forward gap → safe; over-estimate
+→ tailgates → the real sluggish rear is hit.
+Reproduce: [`reproduce_sandwich_hocbf.sh`](reproduce_sandwich_hocbf.sh) →
+[`saved_results/sandwich_hocbf/`](saved_results/sandwich_hocbf/) (actual rear OVM `α/β = 0.40/0.32`;
+only the *assumed* rear is swept).
+
+| assumed (scale) | min h_f | min h_r | outcome |
+|---|---|---|---|
+| passive (×0) | 2.86 | 3.76 | safe (over-cautious) |
+| under (×0.5) | 1.07 | 2.06 | safe |
+| **accurate (×1)** | 0.23 | **1.06** | **safe both** |
+| over (×2.5) | 0.03 | **−0.40** | **rear-end** (still forward-safe) |
+
+![Stage A — sandwiched HOCBF](saved_results/sandwich_hocbf/compare_sandwich.png)
+
+### Stage B — backup CBF, an alternative to the HOCBF (`sandwiched_bcbf.py`, `--method sandwiched_bcbf`)
+
+A **different CBF** for the same sandwich: a backup CBF instead of the analytic HOCBF. Escaping to
+`v_max` is impossible (the lead blocks the ego), so the backup policy is a **rear-aware
+car-following OVM** — follow the lead but brake *less* when the rear is catching up
+(`+ β_f (v_rear − v_ego)`). The 4-state augmented plant `[s_e,v_e,s_r,v_r]` gives a rigorous flow
+STM; forward & rear barriers are imposed along the rollout, forward-priority.
+
+This baseline ([`saved_results/sandwich_bcbf/`](saved_results/sandwich_bcbf/) run_001–004) carries
+**no robustness-to-mismatch (ISSf) consideration yet** — it is the plain backup CBF. But because
+the backup's gentleness depends on the *assumed* rear, sweeping that assumed parameter already
+**previews** the accuracy-decides-safety reaction (actual rear fixed at `0.32/0.224`, assumed swept
+passive → over): accurate is safe but **grazes `d_min`** (`min h_r = 0.77`) and the over-estimate
+**rear-ends** (`−0.19`) — exactly mirroring Stage A's HOCBF.
+
+| assumed (scale) | min h_f | min h_r | outcome |
+|---|---|---|---|
+| passive (×0) | 5.52 | 2.86 | safe (over-cautious) |
+| under (×0.5) | 2.92 | 1.77 | safe |
+| accurate (×1) | 1.71 | **0.77** | safe but grazes `d_min` |
+| over (×2.5) | 0.63 | **−0.19** | **rear-end** |
+
+![Stage B baseline — backup CBF](saved_results/sandwich_bcbf/compare_sandwich.png)
+
+### Stage B+ — ISSf rear margin (`saved_results/sandwich_bcbf/` run_005–008) — fix real rear, vary the *belief* rear
+Now add interaction-error robustness: inflate the **rear** barrier by a mismatch-proportional
+buffer `L_inter·(|Δα|+|Δβ|) + residue` (opt-in `--l-inter-ratio`, `--l-inter-residue`), promoted so
+it actually shapes the brake (`--rho-rear`, with a firmer class-K gain `--gamma`). Same assumed-rear
+sweep, same fixed actual `0.32/0.224`. The margin pulls the over-estimate case from a hard rear-end
+(`−0.19`) up to **collision-free** (`+0.20`) — though the physical sandwich keeps it from fully
+restoring the `d_min` comfort margin (that would require hitting the lead).
+
+| assumed (scale) | baseline `min h_r` | **ISSf** `min h_r` |
+|---|---|---|
+| passive (×0) | 2.86 | 2.05 |
+| under (×0.5) | 1.77 | 1.87 |
+| accurate (×1) | 0.77 | 1.06 |
+| over (×2.5) | **−0.19** (rear-end) | **+0.20** (collision-free) |
+
+![Stage B+ — ISSf rear margin](saved_results/sandwich_bcbf/compare_issf.png)
+
+Both stages are reproduced by [`reproduce_sandwich_bcbf.sh`](reproduce_sandwich_bcbf.sh).
+
+#### Parameter variations across the backup-CBF experiments
+
+The operating point was **re-tuned** as the study progressed. The three ISSf experiments below
+share the *same* ISSf gains (`L_inter = 4.0`, `residue = 0.5`, `ρ_rear = 3e4`) but differ in what is
+held fixed vs. swept; the class-K gain `γ` was raised **`1.0 → 2.0`** when the ISSf margin was
+introduced (the promoted rear constraint needs a firmer gain to bite) and stayed `2.0` thereafter.
+Nominal rear `0.32/0.224`, `κ = 0.7`, `a_e = 2.5`, lead brake `1.5` throughout.
+
+| experiment | assumed rear (belief) | real rear (actual) | `γ` | ISSf gains |
+|---|---|---|---|---|
+| baseline — `sandwich_bcbf` run_001–004 | **swept** `0/0 → 0.8/0.56` | fixed `0.32/0.224` | 1.0 | none |
+| ISSf — `sandwich_bcbf` run_005–008 | **swept** `0/0 → 0.8/0.56` | fixed `0.32/0.224` | 2.0 | 4.0, 0.5, 3e4 |
+| mirror sweep — `sandwich_bcbf_rear_sweep` | fixed `0.32/0.224` | **swept** `×0.25 → ×2.0` | 2.0 | 4.0, 0.5, 3e4 |
+| stress — `sandwich_bcbf_stress` | per-strategy¹ | **random** `±30%` of nominal | 2.0 | 4.0, 0.5, 3e4 |
+
+¹ Stress strategies: **A** assumes passive `0/0`; **B** & **C** assume nominal `0.32/0.224`; **D**
+assumes the actual rear (oracle).
+
+### Mirror sweep — fix belief, vary the *real* rear
+
+Pin the ego's belief at `0.32/0.224` and vary the **real** rear `×0.25 … ×2.0` (the ISSf buffer
+auto-adapts to the realized mismatch). Effort is U-shaped (cheapest at accurate); the
+under-estimate side (real rear *more* responsive than believed) is always safe but costly, while
+the extreme over-estimate (`×0.25`, a near-unbraking rear) is unrecoverable — rear-end `−17` and
+even a forward graze — the limit of the reactive rear lever (an uncontrolled rear that won't brake
+cannot be saved by the ego alone). Same script as Stage B →
+[`saved_results/sandwich_bcbf_rear_sweep/`](saved_results/sandwich_bcbf_rear_sweep/).
+
+![Mirror sweep](saved_results/sandwich_bcbf_rear_sweep/compare_rear_sweep.png)
+
+Remark: the ISSf sweep and the mirror sweep coincide **only at the accurate case** —
+[`sandwich_bcbf/run_007`](saved_results/sandwich_bcbf/run_007) (ISSf, accurate) and
+[`sandwich_bcbf_rear_sweep/run_004`](saved_results/sandwich_bcbf_rear_sweep/run_004) both have
+belief = actual = nominal `0.32/0.224`, so they are the *identical* config (same fingerprint, same
+results). Runs at the **same scale otherwise differ**, because the two sweeps move in opposite
+mismatch directions: scaling the *actual* while fixing the belief (mirror sweep) at e.g. ×0.5 is
+**over**-estimation (real rear sluggish than believed), whereas scaling the *belief* while fixing
+the actual (ISSf sweep) at ×0.5 is **under**-estimation.
+
+### Stress test — 4 strategies, randomized rear (`stress_test_sandwich.py`) — vary the *real* rear, belief differs per strategy
+
+Randomize the real rear `±30%` around nominal (20 paired draws) and compare four ways of handling
+the interaction: **A** worst-case (assume passive), **B** nominal belief no buffer, **C** nominal +
+ISSf buffer, **D** oracle (assume the actual rear) + buffer. The groups cluster in distinct regions
+of the (intervention-effort, `min h_r`) plane →
+[`saved_results/sandwich_bcbf_stress/`](saved_results/sandwich_bcbf_stress/) (`raw/` + `aggregated/`
+saved separately; the figure is built from the aggregated JSON alone).
+
+| group | effort | collision-free | clears `d_min` |
+|---|---|---|---|
+| A worst-case (passive) | 42 | 100% | 100% (very conservative) |
+| B nominal, no buffer | 26 | **85%** | 55% |
+| C nominal + ISSf | 29 | **100%** | 80% |
+| D oracle + ISSf | 25 | **100%** | 80% |
+
+C and D are safe (no collision) at far lower effort than the conservative A; B is cheap but unsafe
+~15% of the time. D's `d_min` honoring is driven only by `l_inter_residue` (its mismatch ≈ 0);
+raising the residue lifts both toward 100% clears-`d_min`. Run with `--jobs N` to parallelize and
+`--no-latex` to disable the Times/LaTeX paper styling.
+
+![Stress-test clusters](saved_results/sandwich_bcbf_stress/stress_clusters.png)
+
+## Saved results catalog
+
+Every saved set under `saved_results/` was produced by the linked script and then moved there
+(the scripts default to gitignored `output/` / `temp_*/`). Each `run_NNN/` holds a `config.json`
+(pruned to the method's params), a `series_*.npz` (re-plottable without re-simulating), and a
+`results.json` (min `h_f`/`h_r`, safety flags, solver stats).
+
+| folder | setup | reproduce | figure(s) |
+|---|---|---|---|
+| [`ego_rear/`](saved_results/ego_rear/) | Scenario 2 method comparison + terminal/robust ablations (run_001–006) | [`reproduce_ego_rear.sh`](reproduce_ego_rear.sh) §A | `compare_baseline_bcbf_hocbf.png`, `compare_bcbf_terminal_constraints.png`, `compare_hocbf_robust.png` |
+| [`ego_rear_interactive_compare/`](saved_results/ego_rear_interactive_compare/) | Scenario 2 assumed-accuracy overlay: baseline + passive/under/accurate/over (run_001–005) | [`reproduce_ego_rear.sh`](reproduce_ego_rear.sh) §B | `compare_runs.png` + per-run `ego_rear.png` |
+| [`ego_rear_interaction_accuracy_stats/`](saved_results/ego_rear_interaction_accuracy_stats/) | Scenario 2 accuracy-statistics sweep (safety flat, performance degrades) | [`reproduce_ego_rear.sh`](reproduce_ego_rear.sh) §C | `accuracy_sweep.png` (+ CSV) |
+| [`sandwich_hocbf/`](saved_results/sandwich_hocbf/) | Stage A HOCBF, assumed-rear sweep (run_001–004) | [`reproduce_sandwich_hocbf.sh`](reproduce_sandwich_hocbf.sh) | `compare_sandwich.png`, `compare_hf_hr_aee.png` |
+| [`sandwich_bcbf/`](saved_results/sandwich_bcbf/) | Stage B backup CBF — baseline (run_001–004) + ISSf margin (run_005–008) | [`reproduce_sandwich_bcbf.sh`](reproduce_sandwich_bcbf.sh) | `compare_sandwich.png`, `compare_issf.png` |
+| [`sandwich_bcbf_rear_sweep/`](saved_results/sandwich_bcbf_rear_sweep/) | Stage B fix-belief / vary-real-rear ×0.25–2.0 (run_001–008) | [`reproduce_sandwich_bcbf.sh`](reproduce_sandwich_bcbf.sh) | `compare_rear_sweep.png` |
+| [`sandwich_bcbf_stress/`](saved_results/sandwich_bcbf_stress/) | 4-strategy Monte-Carlo stress test (n=20, ±30% rear) | [`stress_test_sandwich.py`](stress_test_sandwich.py) | `stress_clusters.png` (+ `raw/`, `aggregated/`) |
 
 ## Running individual methods, saved data, and comparison plots
 
@@ -322,23 +448,33 @@ than the default `<example>/output`.
   rear's reaction. `--hocbf-robust-factor` hedges against under-responsiveness, but a
   fully adversarial tailgater cannot be guaranteed against by any ego controller —
   an RSS-style "not at fault" framing is the honest fallback there.
-- **Backup CBF (interaction-inconsistent guarantee).** Works in simulation (keeps
-  `min h_r >= d_min`, QP consistently feasible), but the safety guarantee is
-  interaction-inconsistent: it assumes the rear reacts to the ego's escape while the
-  ego actually applies the filtered control. Also has a `v_max`-saturation chatter
-  degeneracy worked around by keeping the escape `v_max` above road speed.
-- **Combined front + rear.** The end goal is the ego *between* a lead and a follower,
-  enforcing `h_f >= 0` and `h_r >= 0` together (they conflict: forward safety wants
-  braking, rear safety wants gentle braking / pulling away). Now in progress as
-  **Scenario 3 (`sandwich`)** — see that section for the controller and the current
-  finding (a naive front+rear clip is insufficient; a rear-aware forward CBF is needed).
+- **Backup CBF, escape-to-`v_max` (Scenario 2 only — rear-only, no lead).** The `ego_rear`
+  backup CBF (`RearEndBackupCBF1D`) works in simulation (keeps `min h_r >= d_min`, QP consistently
+  feasible), but its safety *guarantee* is interaction-inconsistent: the backup rollout assumes the
+  rear reacts to the ego's **escape (accelerate to `v_max`)**, while the ego actually applies the
+  filtered (near-nominal) control, so the rear reacts to that instead. It also has a
+  `v_max`-saturation chatter degeneracy worked around by keeping the escape `v_max` above road
+  speed. Both are artifacts of the *escape* maneuver, which only exists with no lead. The
+  **Scenario 3 sandwich** backup CBF (`SandwichedBackupCBF1D`) cannot escape forward, so it uses a
+  rear-aware *follow-lead* backup instead — its open issue is rear-model **mismatch** (the ISSf
+  margin and its reactive-limit caveat above), not this escape inconsistency.
+- **Combined front + rear (Scenario 3, `sandwich`).** Solved two ways — an analytic HOCBF
+  (`a_e_eff` coupling) and a backup CBF (rear-aware OVM backup) — both making the ego
+  *proactively hang back* so accuracy decides safety. An opt-in **ISSf rear margin** robustifies
+  the backup CBF against rear-model mismatch, and a 4-strategy stress test quantifies it. Residual
+  limit: the *reactive* rear margin cannot rescue an extreme over-estimate (a near-unbraking real
+  rear) without hitting the lead — that case is physically unrecoverable for the ego alone.
 
 ## Files
 | File | Role |
 |------|------|
 | `run_three_car.py` | Scenario 1 (three-car): simulation, figure, registry, saved series |
-| `run_sandwich.py` | Scenario 3 (sandwich): combined front+rear ego (WIP; rear-aware forward CBF) |
-| `sandwiched_cbf.py` | `SandwichedHOCBF` — forward CBF + coupled rear HOCBF combined filter |
+| `run_sandwich.py` | Scenario 3 (sandwich): `--method {sandwiched_hocbf,sandwiched_bcbf}` combined front+rear ego |
+| `sandwiched_cbf.py` | `SandwichedHOCBF` — Stage A: forward CBF + coupled rear HOCBF (`a_e_eff` coupling) |
+| `sandwiched_bcbf.py` | `SandwichedBackupCBF1D` — Stage B: rear-aware OVM backup CBF + ISSf rear margin |
+| `plot_sandwich_cases.py` | overlay/compare saved sandwich runs (forward+rear gaps + phase portraits) |
+| `stress_test_sandwich.py` | 4-strategy Monte-Carlo stress test (`--jobs`, `--no-latex`); raw + aggregated + cluster figure |
+| `reproduce_*.sh` | one-shot scripts that regenerate each `saved_results/` set (ego_rear / sandwich_hocbf / sandwich_bcbf) |
 | `run_ego_rear.py` | Scenario 2 (ego + rear): one `--method` (baseline/bcbf/hocbf) per run, figure, registry, saved series |
 | `plot_runs.py` | independent comparison plotter (overlay saved runs via a JSON spec) |
 | `plot_accuracy_sweep.py` | statistics plotter for the `interaction_accuracy` sweep CSV |
