@@ -1,0 +1,9 @@
+{
+  "output": "saved_results/sandwich_story/compare_story_issf075.png",
+  "runs": {
+    "forward CBF only (rear-end)": "saved_results/sandwich_story/run_001",
+    "A: worst-case / passive (safe)": "saved_results/sandwich_story/run_002",
+    "B: nominal, no buffer (rear-end)": "saved_results/sandwich_story/run_003",
+    "C: nominal + ISSf res=0.75 (safe)": "saved_results/sandwich_story/run_005"
+  }
+}

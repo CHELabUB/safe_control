@@ -1,0 +1,9 @@
+run_name,timestamp,fingerprint,scenario,method,ego_model,ego_target,v_desired,v_max,rear_model,assumed_rear_model,rear_alpha,rear_beta,assumed_rear_alpha,assumed_rear_beta,rear_kappa,rear_a_decel,gap_r0,mismatch,note,config_path
+run_001,2026-06-28T16:49:26,6b6085f429f6,sandwich,forward_only,ovm,,,,ovm,ovm,0.24,0.168,0.24,0.168,0.7,2.5,4.5,False,story_fwd_only,run_001/config.json
+run_002,2026-06-28T16:49:50,65193fc0da49,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.24,0.168,0.0,0.0,0.7,2.5,4.5,True,story_A_passive,run_002/config.json
+run_003,2026-06-28T16:50:13,0d561cf97f16,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.24,0.168,0.32,0.224,0.7,2.5,4.5,True,story_B_nominal,run_003/config.json
+run_004,2026-06-28T16:50:38,941393e9aafc,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.24,0.168,0.32,0.224,0.7,2.5,4.5,True,story_C_issf,run_004/config.json
+run_005,2026-06-28T16:57:05,417dd1e08a8c,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.24,0.168,0.32,0.224,0.7,2.5,4.5,True,story_C_issf075,run_005/config.json
+run_006,2026-06-28T17:05:48,2692dd07ac27,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.24,0.168,0.32,0.224,0.7,2.5,4.5,True,story_C_issf100,run_006/config.json
+run_007,2026-06-28T20:35:22,48e3aa54fb3b,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.24,0.168,0.32,0.224,0.7,2.5,4.5,True,story_C_Linter6_res05,run_007/config.json
+run_008,2026-06-28T20:35:47,c4cb7ac1358a,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.24,0.168,0.32,0.224,0.7,2.5,4.5,True,story_C_Linter8_res05,run_008/config.json

@@ -35,22 +35,78 @@ from double_integrator_1d import DoubleIntegrator1D                # noqa: E402
 from car_following_models import nominal_accel                     # noqa: E402
 from rear_aware_models import rear_accel                           # noqa: E402
 from run_three_car import build_lead_trace                         # noqa: E402
+from car_following_cbf import CarFollowingCBF1D                    # noqa: E402
 from sandwiched_cbf import SandwichedHOCBF                         # noqa: E402
 from sandwiched_bcbf import SandwichedBackupCBF1D                  # noqa: E402
 from run_registry import RunRegistry                               # noqa: E402
 
-METHODS = ['sandwiched_hocbf', 'sandwiched_bcbf']
-METHOD_STYLE = {'sandwiched_hocbf': ('sandwiched HOCBF', 'tab:blue'),
+METHODS = ['forward_only', 'sandwiched_hocbf', 'sandwiched_bcbf']
+METHOD_STYLE = {'forward_only': ('forward CBF only (no rear)', 'tab:red'),
+                'sandwiched_hocbf': ('sandwiched HOCBF', 'tab:blue'),
                 'sandwiched_bcbf': ('sandwiched backup CBF', 'tab:green')}
 
 
 def simulate_sandwich(cfg, dt, n_sim, method):
     """Lead (scripted, mild brake) -> ego (front+rear filter) -> rear (OVM, no filter)."""
+    if method == 'forward_only':
+        return _simulate_forward_only(cfg, dt, n_sim)
     if method == 'sandwiched_hocbf':
         return _simulate_hocbf(cfg, dt, n_sim)
     if method == 'sandwiched_bcbf':
         return _simulate_bcbf(cfg, dt, n_sim)
     raise NotImplementedError(f"unknown method '{method}'")
+
+
+def _simulate_forward_only(cfg, dt, n_sim):
+    """Baseline: ego runs ONLY the forward CBF (no rear awareness) on the sandwich scenario.
+    Same aggressive nominal + lead + actual rear as the rear-aware methods, so it is an
+    apples-to-apples motivation: the ego stays safe vs the lead but rear-ends the sluggish rear."""
+    L = L_COMBINED
+    s_lead, v_lead = build_lead_trace(cfg['s_lead0'], n_sim, dt, cfg['lead'])
+    p_safe = cfg['p_safe']
+    spec = {'model': 'DoubleIntegrator1D', 'u_max': cfg['u_acc'], 'a_max': cfg['u_acc'],
+            'v_max': p_safe['vbar'], 'body_length': BODY_LENGTH}
+    ego = DoubleIntegrator1D(dt, dict(spec))
+    rear = DoubleIntegrator1D(dt, dict(spec))
+    cbf = CarFollowingCBF1D(spec, p_safe, gamma=cfg['gamma'], L=L)
+
+    xe = np.array([s_lead[0] - L - cfg['gap_f0'], v_lead[0]])
+    xr = np.array([xe[0] - L - cfg['gap_r0'], v_lead[0]])
+
+    out = {k: np.zeros(n_sim + 1) for k in ('s_ego', 'v_ego', 's_rear', 'v_rear')}
+    for k in ('h_f', 'h_r', 'u_ego', 'u_nom', 'u_rear'):
+        out[k] = np.zeros(n_sim)
+    out['qp_status'] = []
+    out['s_ego'][0], out['v_ego'][0] = xe
+    out['s_rear'][0], out['v_rear'][0] = xr
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='.*Solution may be inaccurate.*')
+        for k in range(n_sim):
+            lead = {'x': s_lead[k], 'vx': v_lead[k], 'length': BODY_LENGTH}
+            ego_d = {'x': xe[0], 'vx': xe[1], 'length': BODY_LENGTH}
+            rear_d = {'x': xr[0], 'vx': xr[1], 'length': BODY_LENGTH}
+
+            u_nom = nominal_accel(cfg['ego_model'], ego_d, lead, cfg['ego_nom'])
+            u_e = cbf.filter(u_nom, xe, s_lead[k], v_lead[k])      # forward CBF only
+            out['qp_status'].append(cbf.last_status)
+            u_e = max(u_e, -xe[1] / dt)
+
+            u_r = rear_accel(rear_d, ego_d, cfg['rear_model'], cfg['rear_actual'])
+            u_r = max(u_r, -xr[1] / dt)
+
+            out['h_f'][k] = (s_lead[k] - L) - xe[0]
+            out['h_r'][k] = (xe[0] - L) - xr[0]
+            out['u_ego'][k], out['u_nom'][k], out['u_rear'][k] = u_e, u_nom, u_r
+
+            xe = np.array(ego.step(xe, np.array([[u_e]]))).flatten(); xe[1] = max(xe[1], 0.0)
+            xr = np.array(rear.step(xr, np.array([[u_r]]))).flatten(); xr[1] = max(xr[1], 0.0)
+            out['s_ego'][k + 1], out['v_ego'][k + 1] = xe
+            out['s_rear'][k + 1], out['v_rear'][k + 1] = xr
+
+    out['s_lead'], out['v_lead'] = s_lead, v_lead
+    return out
 
 
 def _simulate_hocbf(cfg, dt, n_sim):
@@ -259,8 +315,9 @@ def make_figure(method, out, cfg, t_state, t_ctrl, save_dir, footnote):
         axu.plot(t_ctrl, out['rhs_f'], color='tab:blue', lw=1.2, ls='--', label='forward ceiling rhs_f')
         axu.plot(t_ctrl, out['lb_r'], color='tab:orange', lw=1.2, ls='--', label='rear floor lb_r')
         axu.plot(t_ctrl, -out['a_e_eff'], color='tab:red', lw=1.2, ls='-.', label='-a_e_eff (rear-aware brake)')
-    else:
+    elif method == 'sandwiched_bcbf':
         axu.plot(t_ctrl, out['h_min'], color='tab:red', lw=1.2, ls='-.', label='backup min-h (fwd&rear)')
+    # forward_only: no extra bound line (plain forward CBF, no rear awareness)
     axu.set_ylabel('ego accel [m/s^2]'); axu.set_xlabel('time [s]'); axu.set_title('Ego control + bounds')
     axu.legend(ncol=2, fontsize=9); axu.grid(alpha=0.3)
 
@@ -442,7 +499,11 @@ def main():
                'min_h_f': min_hf, 'min_h_r': min_hr,
                'front_collision': bool(min_hf <= 0), 'rear_end': bool(min_hr <= 0),
                'status_stats': status_stats}
-    if 'conflict' in out:                       # HOCBF-only diagnostic
+    if method == 'forward_only':                # baseline: no rear awareness, just effort
+        effort = float(np.sum(np.abs(out['u_ego'] - out['u_nom'])) * dt)
+        results['control_effort_integral'] = effort
+        print(f"  control effort integral(|u-u_nom| dt) = {effort:.3f}  (forward CBF only, no rear awareness)")
+    elif method == 'sandwiched_hocbf':          # HOCBF-only diagnostic
         conflict_frac = float(np.mean(out['conflict']))
         results['conflict_fraction'] = conflict_frac
         print(f"  conflict fraction = {conflict_frac:.3f}  (rear floor > forward ceiling)")

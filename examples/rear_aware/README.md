@@ -298,6 +298,44 @@ Nominal rear `0.32/0.224`, `κ = 0.7`, `a_e = 2.5`, lead brake `1.5` throughout.
 ¹ Stress strategies: **A** assumes passive `0/0`; **B** & **C** assume nominal `0.32/0.224`; **D**
 assumes the actual rear (oracle).
 
+### Motivating example — four ways to handle the rear at one operating point
+
+To make the trade-off concrete, fix a single scenario — a slightly-sluggish **real** rear
+(`α/β = 0.24/0.168`, i.e. ×0.75 of the `0.32/0.224` the ego *believes*) behind the aggressive ego
+nominal and the mild (`1.5`) lead brake — and compare four controllers
+([`saved_results/sandwich_story/`](saved_results/sandwich_story/)):
+
+| controller | min h_f | min h_r | ∫\|u−u_nom\| | outcome |
+|---|---|---|---|---|
+| **forward CBF only** (`--method forward_only`, no rear awareness) | 0.30 | **−6.70** | 0.8 | forward-safe but **slams the rear** |
+| **A** — worst-case (assume rear passive `0/0`) | 5.3 | 2.19 | 42.2 | safe, but ~1.7× over-conservative |
+| **B** — nominal belief, no buffer | 1.7 | **−1.67** | 26.3 | **rear-ends** (over-trusts the real rear) |
+| **C** — nominal belief + ISSf buffer (residue 0.5) | 1.6 | 0.70 | 25.3 | **safe** (collision-free), cheapest |
+
+![Motivating story — forward-only vs A/B/C](saved_results/sandwich_story/compare_story.png)
+
+The forward-only baseline (a permanent `run_sandwich.py --method forward_only`, run on the *same*
+scenario as A/B/C — not the off-regime default `run_three_car`) does almost nothing for the rear
+and is demolished; the worst-case A is safe only by hanging back hugely; the plain nominal model B
+over-trusts the rear and rear-ends it; only the ISSf buffer **C is both safe and least
+conservative** (cheaper even than the crashing B).
+
+**Sizing the buffer.** C's buffer is `L_inter·(|Δα|+|Δβ|) + residue`. Sweeping it at this (hardest)
+operating point shows `min h_r` tracks the **total buffer** almost perfectly, *independent of how it
+is split* between the oracle mismatch term and the fixed residue:
+
+| `L_inter` / `residue` | total buffer [m] | min h_r | clears `d_min` |
+|---|---|---|---|
+| 4 / 0.5 | 1.04 | 0.70 | ✗ |
+| 4 / 0.75  (≈ 6 / 0.5) | ~1.3 | 0.85 | ✗ |
+| **4 / 1.0  (≈ 8 / 0.5)** | **~1.55** | **1.00** | **✓** |
+
+Clearing the `d_min` comfort margin here needs **≈ 1.55 m of buffer however you split it**. Since
+the mismatch term is an *oracle* (it needs the true rear, unavailable in deployment), the **residue
+is the only part you can actually budget** — `L_inter` vs `residue` is a modeling preference, not a
+performance lever. The C variants (residue 0.5 / 0.75 / 1.0, and `L_inter` 6 / 8) are saved as
+`run_004 … run_008` with overlay figures `compare_story_issf{075,100}.png`.
+
 ### Mirror sweep — fix belief, vary the *real* rear
 
 Pin the ego's belief at `0.32/0.224` and vary the **real** rear `×0.25 … ×2.0` (the ISSf buffer
@@ -358,6 +396,7 @@ Every saved set under `saved_results/` was produced by the linked script and the
 | [`sandwich_bcbf/`](saved_results/sandwich_bcbf/) | Stage B backup CBF — baseline (run_001–004) + ISSf margin (run_005–008) | [`reproduce_sandwich_bcbf.sh`](reproduce_sandwich_bcbf.sh) | `compare_sandwich.png`, `compare_issf.png` |
 | [`sandwich_bcbf_rear_sweep/`](saved_results/sandwich_bcbf_rear_sweep/) | Stage B fix-belief / vary-real-rear ×0.25–2.0 (run_001–008) | [`reproduce_sandwich_bcbf.sh`](reproduce_sandwich_bcbf.sh) | `compare_rear_sweep.png` |
 | [`sandwich_bcbf_stress/`](saved_results/sandwich_bcbf_stress/) | 4-strategy Monte-Carlo stress test (n=20, ±30% rear) | [`stress_test_sandwich.py`](stress_test_sandwich.py) | `stress_clusters.png` (+ `raw/`, `aggregated/`) |
+| [`sandwich_story/`](saved_results/sandwich_story/) | Motivating example at one operating point: forward-only vs A/B/C + buffer-sizing variants (run_001–008) | `run_sandwich.py --method forward_only` / `sandwiched_bcbf` | `compare_story.png` (+ `compare_story_issf{075,100}.png`) |
 
 ## Running individual methods, saved data, and comparison plots
 
