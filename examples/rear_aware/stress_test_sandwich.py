@@ -62,7 +62,9 @@ GROUP_LABELS = {
     'C': 'C: nominal + ISSf buffer',
     'D': 'D: oracle + buffer',
 }
-GROUP_COLORS = {'A': 'tab:gray', 'B': 'tab:red', 'C': 'tab:blue', 'D': 'tab:green'}
+# Colours consistent with the motivating story figure: A worst-case = green,
+# B no-buffer = blue, C nominal+buffer = purple, D oracle = grey.
+GROUP_COLORS = {'A': 'tab:green', 'B': 'tab:blue', 'C': 'tab:purple', 'D': 'tab:gray'}
 ORDER = ['A', 'B', 'C', 'D']
 
 
@@ -255,14 +257,15 @@ def plot_aggregated(agg, out_png, use_tex=True):
     _set_paper_style() if tex else _set_plain_style()
     groups = agg['groups']
     d_min = agg['d_min']
-    S = 1.2                                              # font scale for paper use
-    LEG_FS, NUM_FS, LBL_FS, TTL_FS = 15 * S, 15 * S, 13 * S, 15 * S
-    INL_FS, HDR_FS, SUP_FS = 11 * S, 16 * S, 17 * S      # inline / header / suptitle
+    S = 1.2 * 1.3                                        # ~1.3x larger panel fonts (paper use)
+    LEG_FS, NUM_FS, LBL_FS, TTL_FS = 15 * S, 13 * S, 13 * S, 15 * S
+    INL_FS = 11 * S                                       # inline reference-line labels
+    HDR_FS, INFO_FS = 18, 14                              # header group key / run-info (fixed, fit width)
 
     # Mode-aware label fragments: LaTeX/Times (tex) vs plain unicode (else).
     INT = r'$\int\!\left|u-u_{\mathrm{nom}}\right|\,\mathrm{d}t$' if tex else '∫|u-u_nom| dt'
-    HF = r'$h_f$' if tex else 'h_f'
-    HR = r'$h_r$' if tex else 'h_r'
+    HF = r'$h_{\rm f}$' if tex else 'h_f'
+    HR = r'$h_{\rm r}$' if tex else 'h_r'
     SIGMA = r'$1\sigma$' if tex else '1σ'
     PM = r'$\pm$' if tex else '±'
     PCT = r'\%' if tex else '%'
@@ -270,8 +273,8 @@ def plot_aggregated(agg, out_png, use_tex=True):
     DMIN_LBL = (r'$d_{\min}=%.1f$' % d_min) if tex else f'd_min={d_min}'
 
     fig = plt.figure(figsize=(16, 13.5))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 0.85], hspace=0.27, wspace=0.17,
-                          top=0.80, bottom=0.06, left=0.07, right=0.97)
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 0.85], hspace=0.27, wspace=0.11,
+                          top=0.78, bottom=0.06, left=0.07, right=0.97)
     ax1 = fig.add_subplot(gs[0, 0])     # top-left:  effort vs rear safety
     ax2 = fig.add_subplot(gs[0, 1])     # top-right: effort vs forward safety
     ax3 = fig.add_subplot(gs[1, :])     # bottom (spans both cols): relative metric bars
@@ -292,9 +295,8 @@ def plot_aggregated(agg, out_png, use_tex=True):
     ax1.text(0.008, d_min, DMIN_LBL, transform=ax1.get_yaxis_transform(),
              ha='left', va='bottom', color='dimgray', fontsize=INL_FS)
     ax1.set_xlabel(f'control intervention  {INT}   (lower = less conservative)', fontsize=LBL_FS)
-    ax1.set_ylabel(f'min rear gap {HR} [m]  (higher = safer)', fontsize=LBL_FS)
-    ax1.set_title(f'Effort vs rear safety (centroid + {SIGMA})', fontsize=TTL_FS)
-    ax1.grid(alpha=0.3); ax1.legend(fontsize=LEG_FS, loc='lower right', markerscale=1.6)
+    ax1.set_title(f'Effort vs rear safety, min {HR} (centroid + {SIGMA})', fontsize=TTL_FS)
+    ax1.grid(alpha=0.3)
 
     # Panel 2: effort vs min h_f
     for grp in ORDER:
@@ -304,13 +306,37 @@ def plot_aggregated(agg, out_png, use_tex=True):
         mean = (s['effort']['mean'], s['min_h_f']['mean'])
         _ellipse(ax2, mean, s['cov_effort_hf'], GROUP_COLORS[grp])
         ax2.plot(*mean, 'o', color=GROUP_COLORS[grp], ms=7, mec='k', zorder=5, label=grp)
-    ax2.axhline(0.0, color='orange', ls='--', lw=1.5)
+    ax2.axhline(0.0, color='red', ls='--', lw=1.5)
     ax2.text(0.008, 0.0, f'lead collision ({HF}=0)', transform=ax2.get_yaxis_transform(),
-             ha='left', va='bottom', color='darkorange', fontsize=INL_FS)
+             ha='left', va='bottom', color='red', fontsize=INL_FS)
     ax2.set_xlabel(f'control intervention  {INT}', fontsize=LBL_FS)
-    ax2.set_ylabel(f'min forward gap {HF} [m]', fontsize=LBL_FS)
-    ax2.set_title(f'Effort vs forward safety (centroid + {SIGMA})', fontsize=TTL_FS)
-    ax2.grid(alpha=0.3); ax2.legend(fontsize=LEG_FS, loc='lower right', markerscale=1.6)
+    ax2.set_title(f'Effort vs forward safety, min {HF} (centroid + {SIGMA})', fontsize=TTL_FS)
+    ax2.grid(alpha=0.3)
+
+    # Shared y-limit on the two scatter panels (so rear vs forward safety compare directly),
+    # then shade the collision zone (gap < 0) red on both.
+    def _vspan(stat, cov_key):
+        out = []
+        for grp in ORDER:
+            if grp not in groups:
+                continue
+            m = groups[grp][stat]['mean']
+            sd = float(np.sqrt(max(np.array(groups[grp][cov_key])[1, 1], 0.0)))
+            out += [m - sd, m + sd]
+        return out
+    yvals = _vspan('min_h_r', 'cov_effort_hr') + _vspan('min_h_f', 'cov_effort_hf') + [0.0, d_min]
+    y_lo, y_hi = min(yvals), max(yvals)
+    pad = 0.10 * (y_hi - y_lo)
+    y_lo, y_hi = y_lo - pad, y_hi + pad
+    for ax in (ax1, ax2):
+        ax.set_ylim(y_lo, y_hi)
+        ax.axhspan(y_lo, 0.0, color='red', alpha=0.08, zorder=0)
+        # Compact unit label (between the top two ticks, snug to the axis) -- narrow, so it
+        # does not widen the gap between the two panels. The title carries rear/forward.
+        ticks = [t for t in ax.get_yticks() if y_lo <= t <= y_hi]
+        yv = 0.5 * (ticks[-1] + ticks[-2]) if len(ticks) >= 2 else y_lo + 0.85 * (y_hi - y_lo)
+        ax.text(-0.015, yv, '[m]', transform=ax.get_yaxis_transform(),
+                ha='right', va='center', fontsize=LBL_FS)
 
     # Panel 3 (spans bottom row): per-group metrics RELATIVE to the largest group per metric,
     # with the relative value printed on each bar. A is largest here -> A=1.00 reference.
@@ -319,13 +345,11 @@ def plot_aggregated(agg, out_png, use_tex=True):
                ('min_h_r', f'min rear gap {HR}', HR)]
     slot = 0.19          # center-to-center spacing of the 4 group bars (< 1 metric slot)
     bw = 0.155           # bar width (< slot -> small visible gap between bars)
-    refs = []
     bar_tops = []                                          # rel+std per bar, for auto y-limit
     for mi, (m, _long, short) in enumerate(metrics):
         means = {g: groups[g][m]['mean'] for g in ORDER if g in groups}
         ref_g = max(means, key=means.get)                 # the "largest group" for this metric
         ref = means[ref_g]
-        refs.append(f"{short}: {ref_g}={ref:.1f}")
         for gi, grp in enumerate(ORDER):
             if grp not in groups:
                 continue
@@ -334,15 +358,15 @@ def plot_aggregated(agg, out_png, use_tex=True):
             bar_tops.append(rel + relstd)
             xpos = mi + (gi - 1.5) * slot
             ax3.bar(xpos, rel, bw, yerr=relstd, capsize=2, color=GROUP_COLORS[grp], alpha=0.85)
-            ax3.text(xpos, rel + relstd + 0.015, f'{rel:.2f}', ha='center',
-                     va='bottom', fontsize=NUM_FS)
+            # Print the ACTUAL value +/- 1 sigma on top (bars themselves are normalized).
+            gmean, gstd = groups[grp][m]['mean'], groups[grp][m]['std']
+            ax3.text(xpos, rel + relstd + 0.02, f'{gmean:.1f}\n{PM}{gstd:.1f}', ha='center',
+                     va='bottom', fontsize=NUM_FS, linespacing=0.9)
     ax3.axhline(1.0, color='gray', ls=':', lw=1.0)
     ax3.set_xticks(range(len(metrics)))
     ax3.set_xticklabels([_long for _, _long, _ in metrics], fontsize=LBL_FS)
     ax3.set_ylabel('relative to largest group (=1.0)', fontsize=LBL_FS)
-    ax3.set_ylim(0, max(1.32, max(bar_tops) + 0.12))       # headroom for the value labels
-    ax3.set_title('Per-group metrics, each normalized to the largest group   ('
-                  + ',   '.join(refs) + ')', fontsize=TTL_FS)
+    ax3.set_ylim(0, max(1.40, max(bar_tops) + 0.24))       # headroom for the value+/-sigma labels
     ax3.grid(alpha=0.3, axis='y')   # group colors are keyed by the header; no per-panel legend
 
     # ---- color-coded group descriptions as an extended title (top of the figure) ----
@@ -350,16 +374,33 @@ def plot_aggregated(agg, out_png, use_tex=True):
                       markeredgecolor='k', markersize=13) for g in ORDER if g in groups]
     labels = [f"{groups[g]['label']} {DASH} rear-safe {groups[g]['pct_collision_free']:.0f}{PCT}"
               for g in ORDER if g in groups]
-    leg = fig.legend(handles, labels, ncol=2, loc='upper center', bbox_to_anchor=(0.5, 0.965),
+    # All run information lives in the top header block (no separate suptitle):
+    # the color-coded group key, plus the MC / scenario / ISSf parameters as its title.
+    meta = agg.get('meta', {})
+    scn = meta.get('scenario', {})
+    issf = meta.get('issf', {})
+    nom = meta.get('nominal', list(NOM))
+    AB = r'$\alpha/\beta$' if tex else 'α/β'
+    LIN = r'$L_{\rm inter}$' if tex else 'L_inter'
+    RHOR = r'$\rho_{\rm rear}$' if tex else 'rho_rear'
+    GAM = r'$\gamma$' if tex else 'gamma'
+    KAP = r'$\kappa$' if tex else 'kappa'
+    BETAF = r'$\beta_{\rm f}$' if tex else 'beta_f'
+    GAPR = r'gap$_{r0}$' if tex else 'gap_r0'
+    info1 = (f"{meta.get('n_draws', '?')} draws, {PM}{int(100 * meta.get('frac', 0))}{PCT} rear "
+             f"spread, seed {meta.get('seed', '?')}    |    nominal rear {AB}="
+             f"{nom[0]:g}/{nom[1]:g}    |    {DMIN_LBL}")
+    info2 = (f"scenario: {GAPR}={scn.get('gap_r0', 0):g} m, lead brake={scn.get('lead_a_brake', 0):g}, "
+             f"backup {BETAF}={scn.get('backup_beta_f', 0):g}, rear {KAP}={scn.get('rear_kappa', 0):g}"
+             f"     ISSf (C,D): {LIN}={issf.get('l_inter_ratio', 0):g}, "
+             f"residue={issf.get('l_inter_residue', 0):g}, {RHOR}={issf.get('rho_rear', 0):g}, "
+             f"{GAM}={issf.get('gamma', 0):g}")
+    leg = fig.legend(handles, labels, ncol=2, loc='upper center', bbox_to_anchor=(0.5, 0.975),
                      fontsize=HDR_FS, frameon=True, columnspacing=4.0, handletextpad=0.6,
-                     borderpad=0.8, labelspacing=0.6)
+                     borderpad=0.9, labelspacing=0.6, title=info1 + '\n' + info2)
+    leg.get_title().set_fontsize(INFO_FS)
     for txt, g in zip(leg.get_texts(), [g for g in ORDER if g in groups]):
         txt.set_color(GROUP_COLORS[g]); txt.set_fontweight('bold')
-
-    meta = agg.get('meta', {})
-    fig.suptitle(f"Sandwich bcbf interaction-handling stress test "
-                 f"(n={meta.get('n_draws', '?')} draws, {PM}{int(100*meta.get('frac', 0))}{PCT} rear, "
-                 f"seed {meta.get('seed', '?')})", fontsize=SUP_FS, y=0.99)
     # Save directly (not via save_figure) so its tight_layout doesn't override the manual
     # top spacing reserved for the color-coded header legend.
     os.makedirs(os.path.dirname(out_png) or '.', exist_ok=True)

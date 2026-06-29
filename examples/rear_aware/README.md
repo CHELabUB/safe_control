@@ -314,11 +314,29 @@ nominal and the mild (`1.5`) lead brake — and compare four controllers
 
 ![Motivating story — forward-only vs A/B/C](saved_results/sandwich_story/compare_story.png)
 
+**The scenario starts the rear *tight*.** The initial rear gap is `h_r(0) = 4.5 m` — only a few
+metres above the `d_min = 1 m` comfort margin — so the rear vehicle begins almost on the ego's
+bumper. With so little slack, every controller's first job is to let the gap *open*: across all four
+cases `h_r` rises out of the tight start over the first few seconds before the lead-brake event
+squeezes it again. That early opening is also what makes the interaction *observable* — the rear's
+response to the ego is what reveals its true responsiveness, so the gap has to breathe before any
+`(α, β)` estimate (or the ISSf mismatch term) means anything.
+
+**A's early "sprint" is the backup CBF reacting to the worst-case rear.** Case A assumes a *passive*
+rear (`α = β = 0`), which in the OVM `a_rear = α(V_h−v) + β(W−v)` means the assumed rear **coasts at
+constant speed and never brakes**. Its backup rollout therefore predicts that if the ego brakes for
+the lead, this never-yielding tail closes the (already tight) gap and rear-ends it — so the
+backup-CBF QP pushes the ego control *above* nominal to **accelerate and open the rear gap
+proactively**, while the forward gap is still large. That is the green speed bump above the lead's
+10 m/s in the first ~1.5 s: A spends forward margin to bank rear margin against an imagined
+non-braking tailgater. It is exactly this conservatism that makes A safe-but-expensive (effort 42
+vs ~26 for B/C). The *real* rear here is merely sluggish (not malicious), so A over-pays; B trusts
+the nominal model and rear-ends when the real rear turns out slower than believed; only the ISSf
+buffer **C is both safe and least conservative** (cheaper even than the crashing B).
+
 The forward-only baseline (a permanent `run_sandwich.py --method forward_only`, run on the *same*
 scenario as A/B/C — not the off-regime default `run_three_car`) does almost nothing for the rear
-and is demolished; the worst-case A is safe only by hanging back hugely; the plain nominal model B
-over-trusts the rear and rear-ends it; only the ISSf buffer **C is both safe and least
-conservative** (cheaper even than the crashing B).
+and is demolished.
 
 **Sizing the buffer.** C's buffer is `L_inter·(|Δα|+|Δβ|) + residue`. Sweeping it at this (hardest)
 operating point shows `min h_r` tracks the **total buffer** almost perfectly, *independent of how it
