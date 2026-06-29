@@ -143,3 +143,40 @@ uv run python "$PLOT" "$OUT2/sandwich_bcbf_rear_sweep_cases.json"
 echo
 echo "Exported rear sweep to $OUT2/"
 echo "  run_001..008  ISSf rear margin (fix belief, vary real rear 0.25..2.0x): U-shaped effort"
+
+# =======================================================================================
+# 5-strategy Monte-Carlo stress test (stress_test_sandwich.py). Randomizes the REAL rear and
+# clusters F/A/B/C/D in (effort, min h_f, min h_r). Expensive (sandwiched_bcbf has a backup QP
+# per step), so it is GATED behind RUN_STRESS=1 and writes to output/ (gitignored) -- the user
+# moves each run's aggregated/ + stress_clusters.png to saved_results/ afterwards.
+#
+# F = forward CBF only (no rear awareness): ISSf- and belief-independent, so it is computed ONCE
+# per draw set and CACHED (output/_forward_cache/), then reused across every same-n variant.
+# A (passive) and B (nominal, no buffer) are ISSf-independent too -- so res075 / L6 / L8 are
+# ASSEMBLED from the base n=20 raw (reuse A,B,F; recompute only C,D for the new ISSf). The
+# aggregated meta records groups_reused / groups_computed / forward_only_cache (provenance).
+if [ "${RUN_STRESS:-0}" = "1" ]; then
+  ST="examples/rear_aware/stress_test_sandwich.py"
+  SOUT="examples/rear_aware/output"
+  J="${STRESS_JOBS:-4}"
+  ISSF_MC=(--rho-rear 3e4 --gamma 2.0 --frac 0.3 --seed 0 --jobs "$J" --with-forward)
+
+  # Base n=20 (res 0.5) and n=100 (res 0.5): full MC over A-D + forward-only (cached).
+  uv run python "$ST" --output-dir "$SOUT/sandwich_bcbf_stress"     --n 20  \
+      --l-inter-ratio 4.0 --l-inter-residue 0.5 "${ISSF_MC[@]}"
+  uv run python "$ST" --output-dir "$SOUT/sandwich_bcbf_stress_100" --n 100 \
+      --l-inter-ratio 4.0 --l-inter-residue 0.5 "${ISSF_MC[@]}"
+
+  # res 0.75 / L_inter 6 / L_inter 8 (all n=20): reuse A,B from the base raw + cached forward-only,
+  # recompute only C,D for the new ISSf params.
+  BASE="$SOUT/sandwich_bcbf_stress/raw/stress_raw.csv"
+  REUSE=(--reuse-from "$BASE" --reuse-groups A,B --n 20 --seed 0 --frac 0.3 \
+         --rho-rear 3e4 --gamma 2.0 --jobs "$J" --with-forward)
+  uv run python "$ST" --output-dir "$SOUT/sandwich_bcbf_stress_res075" --l-inter-ratio 4.0 --l-inter-residue 0.75 "${REUSE[@]}"
+  uv run python "$ST" --output-dir "$SOUT/sandwich_bcbf_stress_L6res05" --l-inter-ratio 6.0 --l-inter-residue 0.5  "${REUSE[@]}"
+  uv run python "$ST" --output-dir "$SOUT/sandwich_bcbf_stress_L8res05" --l-inter-ratio 8.0 --l-inter-residue 0.5  "${REUSE[@]}"
+
+  echo
+  echo "Stress test -> $SOUT/sandwich_bcbf_stress{,_100,_res075,_L6res05,_L8res05}/"
+  echo "  5 strategies F/A/B/C/D; move each aggregated/ + stress_clusters.png to saved_results/."
+fi

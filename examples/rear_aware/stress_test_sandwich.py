@@ -50,26 +50,36 @@ from rear_aware_common import plt, save_figure               # noqa: E402
 NOM = (0.32, 0.224)                                          # nominal rear (alpha, beta)
 
 # group -> (assumed-rear spec, uses-ISSf).  assumed: 'passive' | 'nominal' | 'oracle'
+# 'F' is the forward-CBF-only baseline (no rear awareness) -- special-cased everywhere.
 GROUPS = {
     'A': ('passive', False),
     'B': ('nominal', False),
     'C': ('nominal', True),
     'D': ('oracle',  True),
 }
+FWD = 'F'                                                    # forward-only baseline key
 GROUP_LABELS = {
+    'F': 'F: forward CBF only (no rear)',
     'A': 'A: worst-case (passive)',
     'B': 'B: nominal, no buffer',
     'C': 'C: nominal + ISSf buffer',
     'D': 'D: oracle + buffer',
 }
-# Colours consistent with the motivating story figure: A worst-case = green,
+# Colours consistent with the motivating story figure: F forward-only = red, A worst-case = green,
 # B no-buffer = blue, C nominal+buffer = purple, D oracle = grey.
-GROUP_COLORS = {'A': 'tab:green', 'B': 'tab:blue', 'C': 'tab:purple', 'D': 'tab:gray'}
-ORDER = ['A', 'B', 'C', 'D']
+GROUP_COLORS = {'F': 'tab:red', 'A': 'tab:green', 'B': 'tab:blue', 'C': 'tab:purple', 'D': 'tab:gray'}
+ORDER = ['A', 'B', 'C', 'D']                                 # rear-aware groups (set the scatter y-limit)
+ORDER_ALL = ['F', 'A', 'B', 'C', 'D']                        # incl. the forward-only baseline
 
 
 def build_argv(group, a, b, scn, issf):
     """Construct the run_sandwich CLI argv for one (group, actual rear) combination."""
+    if group == FWD:                                          # forward CBF only: no rear awareness
+        return ['--method', 'forward_only',
+                '--rear-kappa', str(scn['rear_kappa']), '--gap-r0', str(scn['gap_r0']),
+                '--lead-a-brake', str(scn['lead_a_brake']),
+                '--a-lead-decel', str(scn['lead_a_brake']),
+                '--rear-alpha', str(a), '--rear-beta', str(b)]
     assumed_kind, use_issf = GROUPS[group]
     argv = ['--method', 'sandwiched_bcbf',
             '--rear-kappa', str(scn['rear_kappa']), '--gap-r0', str(scn['gap_r0']),
@@ -92,13 +102,14 @@ def build_argv(group, a, b, scn, issf):
 
 def run_one(group, a, b, scn, issf):
     """Run one sim; return realized-metric dict (no disk writes)."""
+    method = 'forward_only' if group == FWD else 'sandwiched_bcbf'
     args = RS.build_parser().parse_args(build_argv(group, a, b, scn, issf))
-    cfg = RS.build_cfg(args, 'sandwiched_bcbf')
+    cfg = RS.build_cfg(args, method)
     dt = args.dt
     n_sim = int(round(args.tf / dt))
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore')
-        out = RS.simulate_sandwich(cfg, dt, n_sim, 'sandwiched_bcbf')
+        out = RS.simulate_sandwich(cfg, dt, n_sim, method)
     min_hf = float(out['h_f'].min())
     min_hr = float(out['h_r'].min())
     effort = float(np.sum(np.abs(out['u_ego'] - out['u_nom'])) * dt)
@@ -128,10 +139,9 @@ def _mc_task(task, scn, issf):
     return r
 
 
-def run_mc(scn, issf, n, seed, frac, jobs=1):
-    """Run the paired MC over all groups; return list of raw rows. jobs>1 -> multiprocessing."""
-    draws = draw_actuals(n, seed, frac)
-    tasks = [(di, g, a, b) for di, (a, b) in enumerate(draws) for g in ORDER]
+def run_groups_over_draws(groups_list, draws, scn, issf, jobs=1):
+    """Run the given groups over the given (alpha,beta) draws; return raw rows (Pool if jobs>1)."""
+    tasks = [(di, g, a, b) for di, (a, b) in enumerate(draws) for g in groups_list]
     total = len(tasks)
     rows = []
     if jobs and jobs > 1:
@@ -143,7 +153,6 @@ def run_mc(scn, issf, n, seed, frac, jobs=1):
                 rows.append(r)
                 if k % 10 == 0 or k == total:
                     print(f"  [{k:3d}/{total}] done", flush=True)
-        rows.sort(key=lambda r: (int(r['draw']), ORDER.index(r['group'])))
     else:
         for k, task in enumerate(tasks, 1):
             r = _mc_task(task, scn, issf)
@@ -152,7 +161,13 @@ def run_mc(scn, issf, n, seed, frac, jobs=1):
             print(f"  [{k:3d}/{total}] draw {di:2d} (a={a:.3f},b={b:.3f}) {r['group']}: "
                   f"min_h_f={r['min_h_f']:6.2f} min_h_r={r['min_h_r']:6.2f} "
                   f"effort={r['effort']:6.2f} buf={r['rear_buffer']:.2f}", flush=True)
+    rows.sort(key=lambda r: (int(r['draw']), groups_list.index(r['group'])))
     return rows
+
+
+def run_mc(scn, issf, n, seed, frac, jobs=1):
+    """Run the paired MC over the rear-aware groups (A-D); return list of raw rows."""
+    return run_groups_over_draws(ORDER, draw_actuals(n, seed, frac), scn, issf, jobs=jobs)
 
 
 def run_pilot(scn, issf, scales):
@@ -186,11 +201,51 @@ def read_raw(path):
                 for row in csv.DictReader(fh)]
 
 
+# --- forward-only ('F') baseline: ISSf-independent, so computed once per draw set + cached ----
+
+def draws_from_rows(rows, ref_group='A'):
+    """Recover the (draw -> (alpha,beta)) pairing from an existing raw, using one group's rows.
+    Lets us extend/assemble a run on EXACTLY its draws without re-deriving from seed/frac."""
+    ref = sorted((r for r in rows if r['group'] == ref_group), key=lambda r: int(r['draw']))
+    return [(float(r['alpha']), float(r['beta'])) for r in ref]
+
+
+def forward_cache_path(draws, scn, cache_dir):
+    """Cache file keyed by the draw tuples + the scenario knobs the forward ego actually sees."""
+    import hashlib
+    key = repr([(round(a, 6), round(b, 6)) for a, b in draws]) + \
+        repr((scn['gap_r0'], scn['lead_a_brake'], scn['rear_kappa']))
+    h = hashlib.sha1(key.encode()).hexdigest()[:12]
+    return os.path.join(cache_dir, f'forward_n{len(draws)}_{h}.csv')
+
+
+def forward_rows(draws, scn, jobs=1, cache_path=None):
+    """Forward-only ('F') rows over the given draws; load from cache_path if present, else compute."""
+    if cache_path and os.path.exists(cache_path):
+        rows = [r for r in read_raw(cache_path) if r['group'] == FWD]
+        print(f"  forward-only: loaded {len(rows)} rows from cache {cache_path}")
+        return rows
+    tasks = [(di, FWD, a, b) for di, (a, b) in enumerate(draws)]
+    issf = {}                                                # unused by forward-only
+    if jobs and jobs > 1:
+        from multiprocessing import Pool
+        from functools import partial
+        with Pool(processes=jobs) as pool:
+            rows = list(pool.imap_unordered(partial(_mc_task, scn=scn, issf=issf), tasks))
+        rows.sort(key=lambda r: int(r['draw']))
+    else:
+        rows = [_mc_task(t, scn, issf) for t in tasks]
+    if cache_path:
+        write_raw(rows, cache_path)
+        print(f"  forward-only: computed + cached {len(rows)} rows -> {cache_path}")
+    return rows
+
+
 def aggregate(rows, meta):
     """Per-group summary (means/stds + covariances for ellipses + safety rates)."""
     d_min = float(rows[0]['d_min']) if 'd_min' in rows[0] else meta.get('d_min', 1.0)
     groups = {}
-    for group in ORDER:
+    for group in ORDER_ALL:
         g = [r for r in rows if r['group'] == group]
         if not g:
             continue
@@ -259,8 +314,9 @@ def plot_aggregated(agg, out_png, use_tex=True):
     d_min = agg['d_min']
     S = 1.2 * 1.3                                        # ~1.3x larger panel fonts (paper use)
     LEG_FS, NUM_FS, LBL_FS, TTL_FS = 15 * S, 13 * S, 13 * S, 15 * S
-    INL_FS = 11 * S                                       # inline reference-line labels
+    INL_FS = 13 * S                                       # inline reference-line / annotation labels
     HDR_FS, INFO_FS = 18, 14                              # header group key / run-info (fixed, fit width)
+    BRK = dict(color='0.35', lw=1.3, ls=(0, (5, 4)), clip_on=False, zorder=10)   # axis-break dashes
 
     # Mode-aware label fragments: LaTeX/Times (tex) vs plain unicode (else).
     INT = r'$\int\!\left|u-u_{\mathrm{nom}}\right|\,\mathrm{d}t$' if tex else '∫|u-u_nom| dt'
@@ -275,105 +331,167 @@ def plot_aggregated(agg, out_png, use_tex=True):
     fig = plt.figure(figsize=(16, 13.5))
     gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 0.85], hspace=0.27, wspace=0.11,
                           top=0.78, bottom=0.06, left=0.07, right=0.97)
-    ax1 = fig.add_subplot(gs[0, 0])     # top-left:  effort vs rear safety
-    ax2 = fig.add_subplot(gs[0, 1])     # top-right: effort vs forward safety
-    ax3 = fig.add_subplot(gs[1, :])     # bottom (spans both cols): relative metric bars
+    # Bottom (spans both cols): relative metric bars on a BROKEN y-axis -- a tall positive
+    # segment (ax3t) and a short, compressed negative segment (ax3b) for the forward-only
+    # rear-end bar, with a break symbol so the negative scale is clearly not the same.
+    gs_bar = gs[1, :].subgridspec(2, 1, height_ratios=[4.0, 1.0], hspace=0.05)
+    ax3t = fig.add_subplot(gs_bar[0])
+    ax3b = fig.add_subplot(gs_bar[1], sharex=ax3t)
 
-    # Panel 1: effort vs min h_r (centroid + 1-sigma ellipse). Legend = A/B/C/D only;
-    # the reference lines are labelled inline (left edge) to keep the legend minimal.
-    for grp in ORDER:
-        if grp not in groups:
-            continue
-        s = groups[grp]
-        mean = (s['effort']['mean'], s['min_h_r']['mean'])
-        _ellipse(ax1, mean, s['cov_effort_hr'], GROUP_COLORS[grp])
-        ax1.plot(*mean, 'o', color=GROUP_COLORS[grp], ms=7, mec='k', zorder=5, label=grp)
-    ax1.axhline(0.0, color='red', ls='--', lw=1.5)
-    ax1.axhline(d_min, color='gray', ls='--', lw=1.3)
-    ax1.text(0.008, 0.0, f'collision ({HR}=0)', transform=ax1.get_yaxis_transform(),
-             ha='left', va='bottom', color='red', fontsize=INL_FS)
-    ax1.text(0.008, d_min, DMIN_LBL, transform=ax1.get_yaxis_transform(),
-             ha='left', va='bottom', color='dimgray', fontsize=INL_FS)
-    ax1.set_xlabel(f'control intervention  {INT}   (lower = less conservative)', fontsize=LBL_FS)
-    ax1.set_title(f'Effort vs rear safety, min {HR} (centroid + {SIGMA})', fontsize=TTL_FS)
-    ax1.grid(alpha=0.3)
+    # The two scatter panels use a 2x2 BROKEN x- and y-axis: the A-D cluster fills the zoomed
+    # top-right cell while the forward-only outlier (low effort, far-off gap) sits in its own
+    # bottom-left cell. Break marks on the interior edges flag the discontinuities.
+    present = [g for g in ORDER_ALL if g in groups]
+    clusterg = [g for g in ORDER if g in groups]
 
-    # Panel 2: effort vs min h_f
-    for grp in ORDER:
-        if grp not in groups:
-            continue
-        s = groups[grp]
-        mean = (s['effort']['mean'], s['min_h_f']['mean'])
-        _ellipse(ax2, mean, s['cov_effort_hf'], GROUP_COLORS[grp])
-        ax2.plot(*mean, 'o', color=GROUP_COLORS[grp], ms=7, mec='k', zorder=5, label=grp)
-    ax2.axhline(0.0, color='red', ls='--', lw=1.5)
-    ax2.text(0.008, 0.0, f'lead collision ({HF}=0)', transform=ax2.get_yaxis_transform(),
-             ha='left', va='bottom', color='red', fontsize=INL_FS)
-    ax2.set_xlabel(f'control intervention  {INT}', fontsize=LBL_FS)
-    ax2.set_title(f'Effort vs forward safety, min {HF} (centroid + {SIGMA})', fontsize=TTL_FS)
-    ax2.grid(alpha=0.3)
+    def _sd(grp, cov_key, i):
+        return float(np.sqrt(max(np.array(groups[grp][cov_key])[i, i], 0.0)))
 
-    # Shared y-limit on the two scatter panels (so rear vs forward safety compare directly),
-    # then shade the collision zone (gap < 0) red on both.
-    def _vspan(stat, cov_key):
-        out = []
-        for grp in ORDER:
-            if grp not in groups:
-                continue
-            m = groups[grp][stat]['mean']
-            sd = float(np.sqrt(max(np.array(groups[grp][cov_key])[1, 1], 0.0)))
-            out += [m - sd, m + sd]
-        return out
-    yvals = _vspan('min_h_r', 'cov_effort_hr') + _vspan('min_h_f', 'cov_effort_hf') + [0.0, d_min]
-    y_lo, y_hi = min(yvals), max(yvals)
-    pad = 0.10 * (y_hi - y_lo)
-    y_lo, y_hi = y_lo - pad, y_hi + pad
-    for ax in (ax1, ax2):
-        ax.set_ylim(y_lo, y_hi)
-        ax.axhspan(y_lo, 0.0, color='red', alpha=0.08, zorder=0)
-        # Compact unit label (between the top two ticks, snug to the axis) -- narrow, so it
-        # does not widen the gap between the two panels. The title carries rear/forward.
-        ticks = [t for t in ax.get_yticks() if y_lo <= t <= y_hi]
-        yv = 0.5 * (ticks[-1] + ticks[-2]) if len(ticks) >= 2 else y_lo + 0.85 * (y_hi - y_lo)
-        ax.text(-0.015, yv, '[m]', transform=ax.get_yaxis_transform(),
+    # Shared effort (x) windows: narrow left segment for forward-only, zoomed right for A-D.
+    eff = {g: groups[g]['effort']['mean'] for g in present}
+    esd = {g: _sd(g, 'cov_effort_hr', 0) for g in present}
+    ce_lo = min(eff[g] - esd[g] for g in clusterg)
+    ce_hi = max(eff[g] + esd[g] for g in clusterg)
+    er = max(ce_hi - ce_lo, 1e-6)
+    x_right = (ce_lo - 0.12 * er, ce_hi + 0.10 * er)
+    x_left = (eff[FWD] - 0.10 * er, eff[FWD] + 0.16 * er)
+
+    def broken_panel(cell, stat, cov_key, title, xlab, show_dmin, zero_in_top, coll_label):
+        sg = cell.subgridspec(2, 2, width_ratios=[1.0, 3.6], height_ratios=[3.6, 1.0],
+                              wspace=0.05, hspace=0.08)
+        tl = fig.add_subplot(sg[0, 0]); tr = fig.add_subplot(sg[0, 1], sharey=tl)
+        bl = fig.add_subplot(sg[1, 0], sharex=tl)
+        br = fig.add_subplot(sg[1, 1], sharex=tr, sharey=bl)
+        chm = [groups[g][stat]['mean'] for g in clusterg]
+        chs = [_sd(g, cov_key, 1) for g in clusterg]
+        clo = min(m - s for m, s in zip(chm, chs)); chi = max(m + s for m, s in zip(chm, chs))
+        cr = max(chi - clo, 1e-6)
+        top_lo = (min(clo, 0.0) if zero_in_top else clo) - 0.10 * cr
+        top_hi = chi + 0.16 * cr
+        fH = groups[FWD][stat]['mean']
+        # Bottom cell: tight around F (and the 0 line when it lives down here), with ABSOLUTE
+        # margins so a wide cluster range never inflates / overlaps it.
+        if zero_in_top:                 # bottom cell holds only F (collision line is up top)
+            half = max(0.5, 0.12 * cr)
+            bot_lo, bot_hi = fH - half, fH + half
+        else:                           # bottom cell holds F together with the collision line
+            lo, hi = min(fH, 0.0), max(fH, 0.0)
+            m = max(0.35, 0.4 * (hi - lo))
+            bot_lo, bot_hi = lo - m, hi + m
+        tl.set_ylim(top_lo, top_hi); bl.set_ylim(bot_lo, bot_hi)
+        tl.set_xlim(*x_left); tr.set_xlim(*x_right)
+
+        for grp in clusterg:            # A-D ellipses + centroids in the zoomed top-right cell
+            m = (groups[grp]['effort']['mean'], groups[grp][stat]['mean'])
+            _ellipse(tr, m, groups[grp][cov_key], GROUP_COLORS[grp])
+            tr.plot(*m, 'o', color=GROUP_COLORS[grp], ms=9, mec='k', zorder=5)
+        bl.plot(eff[FWD], fH, marker='v', color=GROUP_COLORS[FWD], ms=16, mec='k', zorder=6)
+
+        for ax in (tl, tr, bl, br):     # lines/shading on every cell; each shows in-window only
+            ax.axhline(0.0, color='red', ls='--', lw=1.5)
+            if show_dmin:
+                ax.axhline(d_min, color='gray', ls='--', lw=1.3)
+            ax.axhspan(ax.get_ylim()[0], 0.0, color='red', alpha=0.08, zorder=0)
+            ax.grid(alpha=0.3); ax.tick_params(labelsize=LEG_FS)
+        if show_dmin:
+            tr.text(0.99, d_min, DMIN_LBL, transform=tr.get_yaxis_transform(),
+                    ha='right', va='top', color='dimgray', fontsize=INL_FS)
+        cax = tr if zero_in_top else br
+        cax.text(0.99, 0.0, coll_label, transform=cax.get_yaxis_transform(),
+                 ha='right', va='top', color='red', fontsize=INL_FS)
+
+        # hide interior spines + duplicate tick labels
+        tl.spines['right'].set_visible(False); tl.spines['bottom'].set_visible(False)
+        tr.spines['left'].set_visible(False); tr.spines['bottom'].set_visible(False)
+        bl.spines['right'].set_visible(False); bl.spines['top'].set_visible(False)
+        br.spines['left'].set_visible(False); br.spines['top'].set_visible(False)
+        tl.tick_params(labelbottom=False, bottom=False)
+        tr.tick_params(labelbottom=False, bottom=False, labelleft=False, left=False)
+        br.tick_params(labelleft=False, left=False)
+        # break = two parallel dashed lines at each interior edge (the hspace/wspace gap separates
+        # the pair). Horizontal pair for the row break; vertical pair for the column break.
+        for ax in (tl, tr):                       # row break: bottom edge of the top row
+            ax.plot([0, 1], [0, 0], transform=ax.transAxes, **BRK)
+        for ax in (bl, br):                       # ... and top edge of the bottom row
+            ax.plot([0, 1], [1, 1], transform=ax.transAxes, **BRK)
+        for ax in (tl, bl):                       # column break: right edge of the left column
+            ax.plot([1, 1], [0, 1], transform=ax.transAxes, **BRK)
+        for ax in (tr, br):                       # ... and left edge of the right column
+            ax.plot([0, 0], [0, 1], transform=ax.transAxes, **BRK)
+        # compact [m] unit label between the top two ticks of the left cell
+        ticks = [t for t in tl.get_yticks() if top_lo <= t <= top_hi]
+        yv = 0.5 * (ticks[-1] + ticks[-2]) if len(ticks) >= 2 else top_lo + 0.8 * cr
+        tl.text(-0.04, yv, '[m]', transform=tl.get_yaxis_transform(),
                 ha='right', va='center', fontsize=LBL_FS)
+        # title + xlabel centered over the whole cell (figure coords)
+        bb = cell.get_position(fig)
+        fig.text(bb.x0 + bb.width / 2, bb.y1 + 0.004, title, ha='center', va='bottom', fontsize=TTL_FS)
+        fig.text(bb.x0 + bb.width / 2, bb.y0 - 0.048, xlab, ha='center', va='top', fontsize=LBL_FS)
 
-    # Panel 3 (spans bottom row): per-group metrics RELATIVE to the largest group per metric,
-    # with the relative value printed on each bar. A is largest here -> A=1.00 reference.
+    broken_panel(gs[0, 0], 'min_h_r', 'cov_effort_hr', f'Effort vs rear safety (min {HR})',
+                 f'control intervention  {INT}  (lower = cheaper)', show_dmin=True,
+                 zero_in_top=True, coll_label=f'collision ({HR}=0)')
+    broken_panel(gs[0, 1], 'min_h_f', 'cov_effort_hf', f'Effort vs forward safety (min {HF})',
+                 f'control intervention  {INT}', show_dmin=False,
+                 zero_in_top=False, coll_label=f'lead collision ({HF}=0)')
+
+    # Bottom (broken y-axis): per-group metrics RELATIVE to the largest group per metric, with the
+    # ACTUAL value +/- 1 sigma printed on each bar. Positive bars live on ax3t; the forward-only
+    # rear-end bar (negative) lives on the short, compressed ax3b.
     metrics = [('effort', f'effort  {INT}', 'effort'),
                ('min_h_f', f'min forward gap {HF}', HF),
                ('min_h_r', f'min rear gap {HR}', HR)]
-    slot = 0.19          # center-to-center spacing of the 4 group bars (< 1 metric slot)
-    bw = 0.155           # bar width (< slot -> small visible gap between bars)
-    bar_tops = []                                          # rel+std per bar, for auto y-limit
+    bar_order = [g for g in ORDER_ALL if g in groups]      # F first, then A-D
+    nb = len(bar_order)
+    slot = 0.16          # center-to-center spacing of the group bars (< 1 metric slot)
+    bw = 0.14            # bar width (< slot -> small visible gap between bars)
+    bar_tops, bar_bots = [], [0.0]                         # rel+-std per bar, for auto y-limits
     for mi, (m, _long, short) in enumerate(metrics):
+        # Reference = largest among the rear-aware groups (A here); F is small/negative so it
+        # never sets the reference. Forward-only's h_r is negative -> its bar points downward.
         means = {g: groups[g][m]['mean'] for g in ORDER if g in groups}
-        ref_g = max(means, key=means.get)                 # the "largest group" for this metric
-        ref = means[ref_g]
-        for gi, grp in enumerate(ORDER):
-            if grp not in groups:
-                continue
+        ref = means[max(means, key=means.get)]
+        for gi, grp in enumerate(bar_order):
             rel = groups[grp][m]['mean'] / ref if ref else 0.0
             relstd = groups[grp][m]['std'] / abs(ref) if ref else 0.0
-            bar_tops.append(rel + relstd)
-            xpos = mi + (gi - 1.5) * slot
-            ax3.bar(xpos, rel, bw, yerr=relstd, capsize=2, color=GROUP_COLORS[grp], alpha=0.85)
-            # Print the ACTUAL value +/- 1 sigma on top (bars themselves are normalized).
+            xpos = mi + (gi - (nb - 1) / 2.0) * slot
+            for ax in (ax3t, ax3b):                        # draw on both; each window clips
+                ax.bar(xpos, rel, bw, yerr=relstd, capsize=2, color=GROUP_COLORS[grp], alpha=0.85)
             gmean, gstd = groups[grp][m]['mean'], groups[grp][m]['std']
-            ax3.text(xpos, rel + relstd + 0.02, f'{gmean:.1f}\n{PM}{gstd:.1f}', ha='center',
-                     va='bottom', fontsize=NUM_FS, linespacing=0.9)
-    ax3.axhline(1.0, color='gray', ls=':', lw=1.0)
-    ax3.set_xticks(range(len(metrics)))
-    ax3.set_xticklabels([_long for _, _long, _ in metrics], fontsize=LBL_FS)
-    ax3.set_ylabel('relative to largest group (=1.0)', fontsize=LBL_FS)
-    ax3.set_ylim(0, max(1.40, max(bar_tops) + 0.24))       # headroom for the value+/-sigma labels
-    ax3.grid(alpha=0.3, axis='y')   # group colors are keyed by the header; no per-panel legend
+            lbl = f'{gmean:.1f}\n{PM}{gstd:.1f}'
+            if rel >= 0:
+                ax3t.text(xpos, rel + relstd + 0.02, lbl, ha='center', va='bottom',
+                          fontsize=NUM_FS, linespacing=0.9)
+                bar_tops.append(rel + relstd)
+            else:
+                # negative bar (forward-only h_r): print the value ABOVE the bar -- just over the
+                # 0 baseline in the top segment -- rather than below the downward bar.
+                ax3t.text(xpos, 0.05, lbl, ha='center', va='bottom',
+                          fontsize=NUM_FS, linespacing=0.9)
+                bar_bots.append(rel - relstd)
+    ax3t.axhline(1.0, color='gray', ls=':', lw=1.0)
+    ax3t.set_ylim(0.0, max(1.40, max(bar_tops) + 0.24))           # positive segment
+    ax3b.set_ylim(min(bar_bots) - 0.15, 0.0)                      # compressed negative segment
+    for ax in (ax3t, ax3b):
+        ax.grid(alpha=0.3, axis='y')
+    # Break the axis between the two segments: two parallel dashed lines (the hspace gap separates
+    # the bottom edge of the top segment from the top edge of the bottom segment).
+    ax3t.spines['bottom'].set_visible(False)
+    ax3b.spines['top'].set_visible(False)
+    ax3t.tick_params(labelbottom=False, bottom=False)
+    ax3t.plot([0, 1], [0, 0], transform=ax3t.transAxes, **BRK)
+    ax3b.plot([0, 1], [1, 1], transform=ax3b.transAxes, **BRK)
+    ax3b.set_xticks(range(len(metrics)))
+    ax3b.set_xticklabels([_long for _, _long, _ in metrics], fontsize=LBL_FS)
+    ax3t.set_ylabel('relative to largest group (=1.0)', fontsize=LBL_FS)
+    ax3t.yaxis.set_label_coords(-0.055, 0.35)                     # center label across both segments
 
     # ---- color-coded group descriptions as an extended title (top of the figure) ----
+    present = [g for g in ORDER_ALL if g in groups]
     handles = [Line2D([0], [0], marker='o', color='w', markerfacecolor=GROUP_COLORS[g],
-                      markeredgecolor='k', markersize=13) for g in ORDER if g in groups]
+                      markeredgecolor='k', markersize=13) for g in present]
     labels = [f"{groups[g]['label']} {DASH} rear-safe {groups[g]['pct_collision_free']:.0f}{PCT}"
-              for g in ORDER if g in groups]
+              for g in present]
     # All run information lives in the top header block (no separate suptitle):
     # the color-coded group key, plus the MC / scenario / ISSf parameters as its title.
     meta = agg.get('meta', {})
@@ -397,10 +515,11 @@ def plot_aggregated(agg, out_png, use_tex=True):
              f"{GAM}={issf.get('gamma', 0):g}")
     leg = fig.legend(handles, labels, ncol=2, loc='upper center', bbox_to_anchor=(0.5, 0.975),
                      fontsize=HDR_FS, frameon=True, columnspacing=4.0, handletextpad=0.6,
-                     borderpad=0.9, labelspacing=0.6, title=info1 + '\n' + info2)
+                     borderpad=0.9, labelspacing=0.6, title=info1 + '\n' + info2,
+                     labelcolor=[GROUP_COLORS[g] for g in present])   # color by label order (robust)
     leg.get_title().set_fontsize(INFO_FS)
-    for txt, g in zip(leg.get_texts(), [g for g in ORDER if g in groups]):
-        txt.set_color(GROUP_COLORS[g]); txt.set_fontweight('bold')
+    for txt in leg.get_texts():
+        txt.set_fontweight('bold')
     # Save directly (not via save_figure) so its tight_layout doesn't override the manual
     # top spacing reserved for the color-coded header legend.
     os.makedirs(os.path.dirname(out_png) or '.', exist_ok=True)
@@ -410,13 +529,13 @@ def plot_aggregated(agg, out_png, use_tex=True):
 
 
 def print_summary(agg):
-    print(f"\n{'group':>26} {'n':>3} {'effort(mean)':>12} {'min_h_r(mean)':>13} "
+    print(f"\n{'group':>30} {'n':>3} {'effort(mean)':>12} {'min_h_r(mean)':>13} "
           f"{'safe%':>6} {'clrDmin%':>9} {'fwdSafe%':>9}")
-    for grp in ORDER:
+    for grp in ORDER_ALL:
         s = agg['groups'].get(grp)
         if not s:
             continue
-        print(f"{s['label']:>26} {s['n']:>3} {s['effort']['mean']:>12.2f} "
+        print(f"{s['label']:>30} {s['n']:>3} {s['effort']['mean']:>12.2f} "
               f"{s['min_h_r']['mean']:>13.2f} {s['pct_collision_free']:>6.0f} "
               f"{s['pct_clears_dmin']:>9.0f} {s['pct_front_safe']:>9.0f}")
 
@@ -437,6 +556,16 @@ def main():
                     help='disable the LaTeX/Times paper styling (default on); use default fonts')
     ap.add_argument('--jobs', type=int, default=1,
                     help='parallel worker processes for the MC (default 1 = sequential)')
+    # forward-only ('F') baseline + group reuse
+    ap.add_argument('--with-forward', action='store_true',
+                    help="include the forward-CBF-only baseline 'F' (computed once per draw set, cached)")
+    ap.add_argument('--forward-cache', default=None,
+                    help='dir for the forward-only cache (default output/_forward_cache)')
+    ap.add_argument('--reuse-from', default=None,
+                    help='assemble a new variant: take --reuse-groups rows from this raw csv, '
+                         'compute only the remaining rear-aware groups, on the SAME draws')
+    ap.add_argument('--reuse-groups', default='A,B',
+                    help='comma-separated groups to reuse from --reuse-from (default A,B)')
     # scenario / ISSf tuning knobs (no code edits needed)
     ap.add_argument('--gap-r0', type=float, default=4.5)
     ap.add_argument('--lead-a-brake', type=float, default=1.5)
@@ -459,6 +588,25 @@ def main():
             'rho_rear': args.rho_rear, 'gamma': args.gamma}
     meta = {'n_draws': args.n, 'seed': args.seed, 'frac': args.frac,
             'nominal': NOM, 'scenario': scn, 'issf': issf}
+    fwd_dir = args.forward_cache or os.path.join(_HERE, 'output', '_forward_cache')
+
+    def add_forward(rows, draws=None):
+        """Append the forward-only 'F' rows (load from cache or compute once for the draw set)."""
+        draws = draws if draws is not None else draws_from_rows(rows)
+        cpath = forward_cache_path(draws, scn, fwd_dir)
+        frows = forward_rows(draws, scn, jobs=args.jobs, cache_path=cpath)
+        return rows + frows, os.path.relpath(cpath, _HERE)
+
+    def finish(rows, provenance):
+        write_raw(rows, raw_path)
+        m = dict(meta); m.update(provenance)
+        agg = aggregate(rows, m)
+        os.makedirs(os.path.dirname(agg_path), exist_ok=True)
+        with open(agg_path, 'w') as fh:
+            json.dump(agg, fh, indent=2)
+        print(f"Wrote aggregated -> {agg_path}")
+        print_summary(agg)
+        plot_aggregated(agg, png_path, use_tex=not args.no_latex)
 
     # --- plot only -------------------------------------------------------------
     if args.from_aggregated:
@@ -468,16 +616,43 @@ def main():
         plot_aggregated(agg, png_path, use_tex=not args.no_latex)
         return
 
-    # --- (re)aggregate + plot from existing raw -------------------------------
+    # --- assemble a NEW variant: reuse A/B from a base raw, compute only C/D ----
+    if args.reuse_from:
+        base = read_raw(args.reuse_from)
+        reuse = [g.strip() for g in args.reuse_groups.split(',') if g.strip()]
+        draws = draws_from_rows(base)
+        reused_rows = [r for r in base if r['group'] in reuse]
+        compute_groups = [g for g in ORDER if g not in reuse]
+        print(f"Reuse {reuse} from {args.reuse_from}; compute {compute_groups} for new ISSf "
+              f"({len(draws)} draws)")
+        rows = reused_rows + run_groups_over_draws(compute_groups, draws, scn, issf, jobs=args.jobs)
+        prov = {'reuse_from': os.path.relpath(args.reuse_from, _HERE),
+                'groups_reused': reuse, 'groups_computed': compute_groups}
+        if args.with_forward:
+            rows, cpath = add_forward(rows, draws)
+            prov['groups_computed'] = compute_groups + [FWD]
+            prov['forward_only_cache'] = cpath
+        finish(rows, prov)
+        return
+
+    # --- (re)aggregate + plot from existing raw (optionally inject forward-only) -
     if args.from_raw:
         rows = read_raw(args.from_raw)
-        agg = aggregate(rows, meta)
-        os.makedirs(os.path.dirname(agg_path), exist_ok=True)
-        with open(agg_path, 'w') as fh:
-            json.dump(agg, fh, indent=2)
-        print(f"Wrote aggregated -> {agg_path}")
-        print_summary(agg)
-        plot_aggregated(agg, png_path, use_tex=not args.no_latex)
+        # Preserve the source run's meta (n/seed/frac/issf/scenario) so the header is accurate,
+        # rather than the CLI defaults. Look for the sibling aggregated json next to the raw.
+        src_agg = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(args.from_raw))),
+                               'aggregated', 'stress_aggregated.json')
+        if os.path.exists(src_agg):
+            src_meta = json.load(open(src_agg)).get('meta', {})
+            meta.update({k: src_meta[k] for k in ('n_draws', 'seed', 'frac', 'issf', 'nominal')
+                         if k in src_meta})
+            scn.update(src_meta.get('scenario', {}))
+        prov = {}
+        if args.with_forward:
+            rows, cpath = add_forward(rows)
+            prov = {'assembled': 'forward-only injected into existing A-D raw',
+                    'forward_only_cache': cpath}
+        finish(rows, prov)
         return
 
     # --- pilot: deterministic separation check (raw csv only) -----------------
@@ -488,14 +663,11 @@ def main():
 
     # --- full MC: raw -> aggregated -> figure ---------------------------------
     rows = run_mc(scn, issf, args.n, args.seed, args.frac, jobs=args.jobs)
-    write_raw(rows, raw_path)
-    agg = aggregate(rows, meta)
-    os.makedirs(os.path.dirname(agg_path), exist_ok=True)
-    with open(agg_path, 'w') as fh:
-        json.dump(agg, fh, indent=2)
-    print(f"Wrote aggregated -> {agg_path}")
-    print_summary(agg)
-    plot_aggregated(agg, png_path, use_tex=not args.no_latex)
+    prov = {}
+    if args.with_forward:
+        rows, cpath = add_forward(rows, draw_actuals(args.n, args.seed, args.frac))
+        prov['forward_only_cache'] = cpath
+    finish(rows, prov)
 
 
 if __name__ == '__main__':

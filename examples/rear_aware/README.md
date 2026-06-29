@@ -295,8 +295,8 @@ Nominal rear `0.32/0.224`, `κ = 0.7`, `a_e = 2.5`, lead brake `1.5` throughout.
 | mirror sweep — `sandwich_bcbf_rear_sweep` | fixed `0.32/0.224` | **swept** `×0.25 → ×2.0` | 2.0 | 4.0, 0.5, 3e4 |
 | stress — `sandwich_bcbf_stress` | per-strategy¹ | **random** `±30%` of nominal | 2.0 | 4.0, 0.5, 3e4 |
 
-¹ Stress strategies: **A** assumes passive `0/0`; **B** & **C** assume nominal `0.32/0.224`; **D**
-assumes the actual rear (oracle).
+¹ Stress strategies: **F** forward CBF only (no rear awareness); **A** assumes passive `0/0`; **B** &
+**C** assume nominal `0.32/0.224`; **D** assumes the actual rear (oracle).
 
 ### Motivating example — four ways to handle the rear at one operating point
 
@@ -375,26 +375,37 @@ mismatch directions: scaling the *actual* while fixing the belief (mirror sweep)
 **over**-estimation (real rear sluggish than believed), whereas scaling the *belief* while fixing
 the actual (ISSf sweep) at ×0.5 is **under**-estimation.
 
-### Stress test — 4 strategies, randomized rear (`stress_test_sandwich.py`) — vary the *real* rear, belief differs per strategy
+### Stress test — 5 strategies, randomized rear (`stress_test_sandwich.py`) — vary the *real* rear, belief differs per strategy
 
-Randomize the real rear `±30%` around nominal (20 paired draws) and compare four ways of handling
-the interaction: **A** worst-case (assume passive), **B** nominal belief no buffer, **C** nominal +
-ISSf buffer, **D** oracle (assume the actual rear) + buffer. The groups cluster in distinct regions
-of the (intervention-effort, `min h_r`) plane →
+Randomize the real rear `±30%` around nominal (20 paired draws) and compare five ways of handling
+the interaction: **F** forward CBF only (no rear awareness), **A** worst-case (assume passive),
+**B** nominal belief no buffer, **C** nominal + ISSf buffer, **D** oracle (assume the actual rear) +
+buffer. The groups cluster in distinct regions of the (intervention-effort, `min h_r`) plane →
 [`saved_results/sandwich_bcbf_stress/`](saved_results/sandwich_bcbf_stress/) (`raw/` + `aggregated/`
 saved separately; the figure is built from the aggregated JSON alone).
 
 | group | effort | collision-free | clears `d_min` |
 |---|---|---|---|
+| F forward CBF only | **0.8** | **0%** (rear-ends, `min h_r ≈ −3.3`) | 0% |
 | A worst-case (passive) | 42 | 100% | 100% (very conservative) |
 | B nominal, no buffer | 26 | **85%** | 55% |
 | C nominal + ISSf | 29 | **100%** | 80% |
 | D oracle + ISSf | 25 | **100%** | 80% |
 
-C and D are safe (no collision) at far lower effort than the conservative A; B is cheap but unsafe
-~15% of the time. D's `d_min` honoring is driven only by `l_inter_residue` (its mismatch ≈ 0);
-raising the residue lifts both toward 100% clears-`d_min`. Run with `--jobs N` to parallelize and
-`--no-latex` to disable the Times/LaTeX paper styling.
+The forward-only baseline is cheapest of all (it barely intervenes) but rear-ends on every draw —
+the price of ignoring the rear. C and D are safe (no collision) at far lower effort than the
+conservative A; B is cheap but unsafe ~15% of the time. D's `d_min` honoring is driven only by
+`l_inter_residue` (its mismatch ≈ 0); raising the residue lifts both toward 100% clears-`d_min`.
+
+**Forward-only is computed once per draw set and cached** (`output/_forward_cache/`): it ignores the
+rear, so it is independent of ISSf and of the assumed rear, and is shared across every same-`n`
+variant (`--with-forward`). Because **A/B are also ISSf-independent**, the residue/`L_inter`
+variants are *assembled* from the base raw — reuse A,B,F and recompute only C,D
+(`--reuse-from <raw.csv> --reuse-groups A,B`); the aggregated `meta` records what was reused vs
+recomputed. The root holds the canonical n=20 / residue-0.5 run; the variant runs live under
+[`saved_results/sandwich_bcbf_stress/variation/`](saved_results/sandwich_bcbf_stress/variation/) —
+`n100` (n=100), `res075` (residue 0.75), and `L6res05`/`L8res05` (`L_inter` 6/8, residue 0.5). Run
+with `--jobs N` to parallelize and `--no-latex` to disable the Times/LaTeX paper styling.
 
 ![Stress-test clusters](saved_results/sandwich_bcbf_stress/stress_clusters.png)
 
@@ -413,7 +424,7 @@ Every saved set under `saved_results/` was produced by the linked script and the
 | [`sandwich_hocbf/`](saved_results/sandwich_hocbf/) | Stage A HOCBF, assumed-rear sweep (run_001–004) | [`reproduce_sandwich_hocbf.sh`](reproduce_sandwich_hocbf.sh) | `compare_sandwich.png`, `compare_hf_hr_aee.png` |
 | [`sandwich_bcbf/`](saved_results/sandwich_bcbf/) | Stage B backup CBF — baseline (run_001–004) + ISSf margin (run_005–008) | [`reproduce_sandwich_bcbf.sh`](reproduce_sandwich_bcbf.sh) | `compare_sandwich.png`, `compare_issf.png` |
 | [`sandwich_bcbf_rear_sweep/`](saved_results/sandwich_bcbf_rear_sweep/) | Stage B fix-belief / vary-real-rear ×0.25–2.0 (run_001–008) | [`reproduce_sandwich_bcbf.sh`](reproduce_sandwich_bcbf.sh) | `compare_rear_sweep.png` |
-| [`sandwich_bcbf_stress/`](saved_results/sandwich_bcbf_stress/) | 4-strategy Monte-Carlo stress test (n=20, ±30% rear) | [`stress_test_sandwich.py`](stress_test_sandwich.py) | `stress_clusters.png` (+ `raw/`, `aggregated/`) |
+| [`sandwich_bcbf_stress/`](saved_results/sandwich_bcbf_stress/) | 5-strategy Monte-Carlo stress test (F/A/B/C/D, n=20, ±30% rear); variants under [`variation/`](saved_results/sandwich_bcbf_stress/variation/) (`n100`, `res075`, `L6res05`, `L8res05`) | [`reproduce_sandwich_bcbf.sh`](reproduce_sandwich_bcbf.sh) `RUN_STRESS=1` ([`stress_test_sandwich.py`](stress_test_sandwich.py)) | `stress_clusters.png` (+ `raw/`, `aggregated/`, `variation/`) |
 | [`sandwich_story/`](saved_results/sandwich_story/) | Motivating example at one operating point: forward-only vs A/B/C + buffer-sizing variants (run_001–008) | `run_sandwich.py --method forward_only` / `sandwiched_bcbf` | `compare_story.png` (+ `compare_story_issf{075,100}.png`) |
 
 ## Running individual methods, saved data, and comparison plots
@@ -518,7 +529,8 @@ than the default `<example>/output`.
 - **Combined front + rear (Scenario 3, `sandwich`).** Solved two ways — an analytic HOCBF
   (`a_e_eff` coupling) and a backup CBF (rear-aware OVM backup) — both making the ego
   *proactively hang back* so accuracy decides safety. An opt-in **ISSf rear margin** robustifies
-  the backup CBF against rear-model mismatch, and a 4-strategy stress test quantifies it. Residual
+  the backup CBF against rear-model mismatch, and a 5-strategy stress test (incl. the forward-only
+  baseline) quantifies it. Residual
   limit: the *reactive* rear margin cannot rescue an extreme over-estimate (a near-unbraking real
   rear) without hitting the lead — that case is physically unrecoverable for the ego alone.
 
@@ -530,7 +542,7 @@ than the default `<example>/output`.
 | `sandwiched_cbf.py` | `SandwichedHOCBF` — Stage A: forward CBF + coupled rear HOCBF (`a_e_eff` coupling) |
 | `sandwiched_bcbf.py` | `SandwichedBackupCBF1D` — Stage B: rear-aware OVM backup CBF + ISSf rear margin |
 | `plot_sandwich_cases.py` | overlay/compare saved sandwich runs (forward+rear gaps + phase portraits) |
-| `stress_test_sandwich.py` | 4-strategy Monte-Carlo stress test (`--jobs`, `--no-latex`); raw + aggregated + cluster figure |
+| `stress_test_sandwich.py` | 5-strategy Monte-Carlo stress test (F/A/B/C/D; forward-only cached + reuse via `--with-forward`/`--reuse-from`, `--jobs`, `--no-latex`); raw + aggregated + cluster figure |
 | `reproduce_*.sh` | one-shot scripts that regenerate each `saved_results/` set (ego_rear / sandwich_hocbf / sandwich_bcbf) |
 | `run_ego_rear.py` | Scenario 2 (ego + rear): one `--method` (baseline/bcbf/hocbf) per run, figure, registry, saved series |
 | `plot_runs.py` | independent comparison plotter (overlay saved runs via a JSON spec) |
