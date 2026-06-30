@@ -483,6 +483,50 @@ It also prints a **config-difference table** read directly from each run's `conf
 (the full pruned config, unlike `register.csv` which keeps only a few key columns): keys
 identical across all runs are hidden, and a key absent from a run's config shows as `-`.
 
+## Animations (`make_video.py`)
+
+`make_video.py` turns any saved `series_*.npz` into a top-down single-lane traffic movie —
+a **black lead**, a **coloured ego**, and a **yellow rear** car driving along the drift-track
+road (reused from `safe_control.envs.drifting_env.DriftingEnv`), with a rich HUD (time, the
+three speeds, `h_f`/`h_r`, and a `BACKUP ACTIVE` flag) and a red collision flash + `REAR-END`
+/ `LEAD COLLISION` banner whenever a gap goes negative. Two **profile panels** sit side-by-side
+(1×2) under the lane — vehicle speeds (left) and the `h_f`/`h_r` headways (right, with the
+sub-zero collision region shaded red) over the whole run — each with a circle marker pinned at
+the current sample. The headway curves are coloured to match the cars (`h_f` = ego colour,
+`h_r` = rear/yellow); each panel's title carries its unit (`speed [m/s]` / `headway [m]`). The
+HUD is trimmed to the clock and a `BACKUP ACTIVE` line (the panels already show the rest). White
+**roadside markers every 10 m** on the boundary
+scroll past to convey motion (the centre line is white too). Axis text/titles render in
+**Times via LaTeX** (`newtxtext,newtxmath`, the same `$h_{\rm r}$` convention as the figures);
+pass `--no-latex` if latex is unavailable. The monospace HUD/banner render without LaTeX.
+
+The **camera tracks a point moving at the run's average speed** (constant velocity), so the
+cars visibly speed up and fall back relative to the frame. Positions are reconstructed from
+the *gaps*: the ego is drawn at `X_ego = s_ego − s_ego[0]`, the lead at `X_ego + L + h_f + b`,
+and the rear at `X_ego − L − h_r − b` (`L = BODY_LENGTH`). The `b` is a small render-only
+buffer (default **3 m**, `--buffer`) so collisions (`h<0`) stay legible instead of perfectly
+overlapping; the HUD/profiles always show the *true* (un-buffered) `h_f`/`h_r`.
+
+Ego colour defaults to the **orange** car; pass `--color` (a stress/story group key, an alias,
+or a raw car colour) to use the group palette: `F`/`forward_only`→red, `A`/`worst_case`→green,
+`B`/`nominal_no_buffer`→blue, `C`/`nominal_issf`→purple, `D`/`oracle`→grey. (Lead is always
+black, rear always yellow.) Output is an `.mp4` via ffmpeg, falling back to `.gif`.
+
+```bash
+# single run (folder or .npz); colour optional
+uv run python examples/rear_aware/make_video.py saved_results/sandwich_story/run_001 --color F
+
+# batch via a JSON spec: {"output_dir": ..., "runs": {"label": {"path":, "color":}}}
+uv run python examples/rear_aware/make_video.py \
+    --spec examples/rear_aware/videos/sandwich_story/story_videos.json
+```
+
+The bundled `videos/sandwich_story/story_videos.json` renders the four motivating cases
+(forward-only→red, A worst-case→green, B no-buffer→blue, C nominal+ISSf→purple) into
+`videos/sandwich_story/video_*.mp4`. Spec run paths resolve like `plot_runs.py` (example dir →
+spec dir → cwd). Car element PNGs live in `videos/elements/` (the black/purple sprites ship
+with an opaque white background, which `make_video.py` keys out automatically).
+
 ## Parameter sweep
 
 Finding representative cases needs tuning. `sweep_rear_aware.py` runs a grid
@@ -546,6 +590,7 @@ than the default `<example>/output`.
 | `reproduce_*.sh` | one-shot scripts that regenerate each `saved_results/` set (ego_rear / sandwich_hocbf / sandwich_bcbf) |
 | `run_ego_rear.py` | Scenario 2 (ego + rear): one `--method` (baseline/bcbf/hocbf) per run, figure, registry, saved series |
 | `plot_runs.py` | independent comparison plotter (overlay saved runs via a JSON spec) |
+| `make_video.py` | render a run's `series_*.npz` as a top-down traffic animation (single run or JSON spec; group-coloured ego, road from `DriftingEnv`, constant-velocity camera, speed/headway profile panels, rich HUD + collision flash) |
 | `plot_accuracy_sweep.py` | statistics plotter for the `interaction_accuracy` sweep CSV |
 | `compare_spec.example.json` | example spec for `plot_runs.py` |
 | `rear_aware_common.py` | shared constants, matplotlib, registry/figure + series save/load helpers |

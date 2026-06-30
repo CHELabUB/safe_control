@@ -1,0 +1,21 @@
+{
+  "output_dir": "videos/sandwich_story",
+  "runs": {
+    "forward CBF only (rear-end)": {
+      "path": "saved_results/sandwich_story/run_001",
+      "color": "F"
+    },
+    "A: worst-case / passive (safe)": {
+      "path": "saved_results/sandwich_story/run_002",
+      "color": "A"
+    },
+    "B: nominal, no buffer (rear-end)": {
+      "path": "saved_results/sandwich_story/run_003",
+      "color": "B"
+    },
+    "C: nominal + ISSf res=0.5 (safe)": {
+      "path": "saved_results/sandwich_story/run_008",
+      "color": "C"
+    }
+  }
+}
