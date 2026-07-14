@@ -102,9 +102,9 @@ def main():
 
     tex = not args.no_latex
     _set_paper_style() if tex else _set_plain_style()
-    S = 1.2 * 1.2    # 1.2x larger fonts on every panel except the text panel (panel 1)
+    S = 1.2 * 1.2 * 1.1    # 1.2x base, then a further 1.1x for the compact proposal figure
     LBL_FS, TTL_FS, LEG_FS, NUM_FS = 14 * S, 14 * S, 12 * S, 12 * S
-    TXT_FS = 8.0    # fixed (independent of S): small on purpose, room for manual overlay
+    TXT_FS = 8.0 * 1.1    # small on purpose (room for manual overlay), matched 1.1x bump
 
     # Mode-aware math/label fragments.
     HF = r'$h_{\rm f}$' if tex else 'h_f'
@@ -124,8 +124,10 @@ def main():
 
     # ---- layout: 3 rows x 2 cols --------------------------------------------------
     #   row 1: case text | effort bar    row 2: ego speed | rear speed    row 3: h_f | h_r
-    fig = plt.figure(figsize=(13, 14))
-    gs = fig.add_gridspec(3, 2, hspace=0.30, wspace=0.20)
+    # Compact proposal layout: rows 2 & 3 shrunk to 0.8 of row 1 -> figure height
+    # scaled to (1+0.8+0.8)/3 of the original 14 in.
+    fig = plt.figure(figsize=(13, 14 * (2.6 / 3.0)))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 0.8, 0.8], hspace=0.30, wspace=0.20)
     ax_txt = fig.add_subplot(gs[0, 0])    # case legend / text
     ax_bar = fig.add_subplot(gs[0, 1])    # effort bar
     ax_ve = fig.add_subplot(gs[1, 0])     # ego speed + lead
