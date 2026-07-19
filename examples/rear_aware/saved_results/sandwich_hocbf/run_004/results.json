@@ -1,0 +1,21 @@
+{
+  "method": "sandwiched_hocbf",
+  "param_mismatch": true,
+  "min_h_f": 0.027380645711829743,
+  "min_h_r": -0.3981874798205354,
+  "front_collision": false,
+  "rear_end": true,
+  "conflict_fraction": 0.2425,
+  "status_stats": {
+    "total_steps": 400,
+    "status_counts": {
+      "optimal": 303,
+      "conflict": 97
+    },
+    "num_infeasible": 0,
+    "num_failure": 0,
+    "num_unbounded": 0,
+    "num_inaccurate": 0,
+    "healthy": true
+  }
+}

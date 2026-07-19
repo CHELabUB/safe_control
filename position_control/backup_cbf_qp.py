@@ -341,13 +341,21 @@ class BackupCBF:
     def _h_safety(self, x, t=0.0):
         """
         Compute safety CBF value h(x).
-        
+
         Returns positive value when safe, negative when unsafe.
         For evade scenario: avoids bullet and stays within valid regions (hallway + pocket).
         """
-        x = np.array(x).flatten()
-        position = x[:2]
+        x_state = np.array(x).flatten()
+        x = x_state  # keep x as alias for rest of function
+        position = x_state[:2]
         robot_radius = self.robot_spec.get('radius', 0.5)
+
+        # Pre-extract headway parameters (applied inside obstacle loops below)
+        _hw_tau = self.robot_spec.get('time_headway_tau', 0.0)
+        _hw_V_ego = float(x_state[5]) if (_hw_tau > 0 and len(x_state) > 5) else 0.0
+        _hw_ego_len = self.robot_spec.get('body_length', 4.5)
+        _hw_lane_thr = self.robot_spec.get('lane_width', 4.0)
+        _hw_x_ego, _hw_y_ego = position[0], position[1]
         
         h_min = float('inf')
         
@@ -414,7 +422,9 @@ class BackupCBF:
                 dist = np.linalg.norm(position - obs_pos)
                 h_obs = dist - robot_radius_base - obs_radius
                 h_min = min(h_min, h_obs)
-        
+                # Note: headway CBF not applied to static obstacles — Euclidean clearance
+                # is the correct constraint for parked/stalled cars.
+
         # Moving obstacle constraint (bullet)
         obs_state = self._get_obstacle_at_time(t)
         for obstacle in self._iter_obstacles(obs_state):
@@ -440,9 +450,16 @@ class BackupCBF:
                 h_obs = dist - robot_radius - obs_radius - self.safety_margin
             
             h_min = min(h_min, h_obs)
-        
+            # Headway CBF for lead moving obstacles in same lane (only when ego approaches lead)
+            obs_vx_m = obstacle.get('vx', 0.0)
+            if (_hw_tau > 0 and obs_x > _hw_x_ego and abs(obs_y - _hw_y_ego) < _hw_lane_thr
+                    and obs_vx_m <= _hw_V_ego):
+                obs_len_m = obstacle.get('length', obstacle.get('body_length', _hw_ego_len))
+                s_bumper = (obs_x - obs_len_m / 2) - (_hw_x_ego + _hw_ego_len / 2)
+                h_min = min(h_min, s_bumper - _hw_V_ego * _hw_tau)
+
         return h_min if h_min != float('inf') else 1.0
-    
+
     def _grad_h_safety(self, x, t=0.0):
         """Compute gradient of safety CBF ∇h(x) via finite differences."""
         eps = 1e-5

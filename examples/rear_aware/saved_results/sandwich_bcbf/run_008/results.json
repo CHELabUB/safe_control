@@ -1,0 +1,45 @@
+{
+  "method": "sandwiched_bcbf",
+  "param_mismatch": true,
+  "min_h_f": 0.16128537673985477,
+  "min_h_r": 0.2045215609428226,
+  "front_collision": false,
+  "rear_end": false,
+  "status_stats": {
+    "total_steps": 400,
+    "status_counts": {
+      "optimal": 308,
+      "user_limit": 37,
+      "optimal_inaccurate": 55
+    },
+    "num_infeasible": 0,
+    "num_failure": 0,
+    "num_unbounded": 0,
+    "num_inaccurate": 55,
+    "healthy": true
+  },
+  "backup_fraction": 0.645,
+  "param_mismatch_mag": 0.8160000000000001,
+  "rear_buffer": 3.7640000000000002,
+  "l_inter_ratio": 4.0,
+  "l_inter_residue": 0.5,
+  "rear_clears_dmin": false,
+  "control_effort_integral": 26.01362844980036,
+  "constraint_satisfaction": {
+    "total_steps": 400,
+    "tol": 0.001,
+    "fallback_steps": 0,
+    "forward_priority": {
+      "relaxed_steps": 219,
+      "max_slack": 3.9849803973438553,
+      "mean_slack_when_relaxed": 1.1089412003669799
+    },
+    "rear_secondary": {
+      "relaxed_steps": 231,
+      "max_slack": 9.36397562787676,
+      "mean_slack_when_relaxed": 5.1773956035002975
+    },
+    "fwd_to_rear_slack_ratio": 0.42556501166881316,
+    "priority_respected": true
+  }
+}

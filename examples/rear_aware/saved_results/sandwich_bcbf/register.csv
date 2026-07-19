@@ -1,0 +1,9 @@
+run_name,timestamp,fingerprint,scenario,method,ego_model,ego_target,v_desired,v_max,rear_model,assumed_rear_model,rear_alpha,rear_beta,assumed_rear_alpha,assumed_rear_beta,rear_kappa,rear_a_decel,gap_r0,mismatch,note,config_path
+run_001,2026-06-27T08:38:18,67b795b9eb0f,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.32,0.224,0.0,0.0,0.7,2.5,4.5,True,passive,run_001/config.json
+run_002,2026-06-27T08:38:39,5403ca2524b5,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.32,0.224,0.16,0.112,0.7,2.5,4.5,True,under,run_002/config.json
+run_003,2026-06-27T08:38:59,796714c47064,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.32,0.224,0.32,0.224,0.7,2.5,4.5,False,accurate,run_003/config.json
+run_004,2026-06-27T08:39:16,dac6e0093f4c,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.32,0.224,0.8,0.56,0.7,2.5,4.5,True,over,run_004/config.json
+run_005,2026-06-27T08:39:47,d6b7c6886fff,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.32,0.224,0.0,0.0,0.7,2.5,4.5,True,issf_passive,run_005/config.json
+run_006,2026-06-27T08:40:11,cc74bf249491,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.32,0.224,0.16,0.112,0.7,2.5,4.5,True,issf_under,run_006/config.json
+run_007,2026-06-27T08:40:34,01c3a25fbb75,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.32,0.224,0.32,0.224,0.7,2.5,4.5,False,issf_accurate,run_007/config.json
+run_008,2026-06-27T08:40:58,8fa71edb3bcf,sandwich,sandwiched_bcbf,ovm,,,,ovm,ovm,0.32,0.224,0.8,0.56,0.7,2.5,4.5,True,issf_over,run_008/config.json

@@ -1,0 +1,20 @@
+{
+  "method": "forward_only",
+  "param_mismatch": false,
+  "min_h_f": 0.30181261837451245,
+  "min_h_r": -6.703619622714456,
+  "front_collision": false,
+  "rear_end": true,
+  "status_stats": {
+    "total_steps": 400,
+    "status_counts": {
+      "optimal": 400
+    },
+    "num_infeasible": 0,
+    "num_failure": 0,
+    "num_unbounded": 0,
+    "num_inaccurate": 0,
+    "healthy": true
+  },
+  "control_effort_integral": 0.7927292506023179
+}

@@ -1,0 +1,13 @@
+{
+  "output": "saved_results/sandwich_bcbf_rear_sweep/compare_rear_sweep.png",
+  "runs": {
+    "x0.25 (over-est, risky)": "saved_results/sandwich_bcbf_rear_sweep/run_001",
+    "x0.50 (over-est)":        "saved_results/sandwich_bcbf_rear_sweep/run_002",
+    "x0.75 (over-est)":        "saved_results/sandwich_bcbf_rear_sweep/run_003",
+    "x1.00 (accurate)":        "saved_results/sandwich_bcbf_rear_sweep/run_004",
+    "x1.25 (under-est)":       "saved_results/sandwich_bcbf_rear_sweep/run_005",
+    "x1.50 (under-est)":       "saved_results/sandwich_bcbf_rear_sweep/run_006",
+    "x1.75 (under-est)":       "saved_results/sandwich_bcbf_rear_sweep/run_007",
+    "x2.00 (under-est, safe)": "saved_results/sandwich_bcbf_rear_sweep/run_008"
+  }
+}

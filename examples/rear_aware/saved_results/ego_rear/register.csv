@@ -1,0 +1,7 @@
+run_name,timestamp,fingerprint,scenario,method,ego_model,ego_target,v_desired,rear_model,assumed_rear_model,rear_kappa,rear_a_decel,gap_r0,mismatch,note,config_path
+run_001,2026-06-25T18:22:38,5b8664748c47,ego_rear,baseline,ovm,speed,1.0,ovm,,1.0,2.0,3.0,False,,run_001/config.json
+run_002,2026-06-25T17:29:32,f7e11796ce0b,ego_rear,bcbf,ovm,speed,1.0,ovm,ovm,1.0,2.0,3.0,False,,run_002/config.json
+run_003,2026-06-25T17:30:20,2c8d21ab7918,ego_rear,hocbf,ovm,speed,1.0,ovm,ovm,1.0,2.0,3.0,False,,run_003/config.json
+run_004,2026-06-25T17:31:14,0ee9fbcfe338,ego_rear,bcbf,ovm,speed,1.0,ovm,ovm,1.0,2.0,3.0,False,,run_004/config.json
+run_005,2026-06-25T17:32:16,565f3fac19d6,ego_rear,hocbf,ovm,speed,1.0,ovm,ovm,1.0,2.0,3.0,False,,run_005/config.json
+run_006,2026-06-25T17:35:52,be9379d315b4,ego_rear,hocbf,ovm,speed,1.0,ovm,ovm,1.0,2.0,3.0,False,,run_006/config.json

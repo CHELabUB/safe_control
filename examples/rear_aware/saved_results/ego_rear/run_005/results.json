@@ -1,0 +1,18 @@
+{
+  "method": "hocbf",
+  "param_mismatch": false,
+  "hocbf_min_h_r": 1.7852051606100794,
+  "hocbf_peak_v": 9.0,
+  "hocbf_safe": true,
+  "hocbf_feasibility": {
+    "total_steps": 240,
+    "status_counts": {
+      "optimal": 240
+    },
+    "num_infeasible": 0,
+    "num_failure": 0,
+    "num_unbounded": 0,
+    "num_inaccurate": 0,
+    "healthy": true
+  }
+}

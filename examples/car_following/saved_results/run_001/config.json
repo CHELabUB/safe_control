@@ -1,0 +1,78 @@
+{
+  "cli": {
+    "nominal_model": "ovm",
+    "tau": 1.0,
+    "kappa": 1.5,
+    "gamma": 1.0,
+    "vbar": 12.0,
+    "a_max": 3.0,
+    "backup_horizon": 4.0,
+    "dt": 0.05,
+    "tf": 12.0,
+    "d_min": 2.0
+  },
+  "scenarios": {
+    "ego_weak": {
+      "a_e": 2.5,
+      "a_l": 4.0,
+      "init_gap": 20.0,
+      "p_safe": {
+        "tau": 1.0,
+        "a_e": 2.5,
+        "a_l": 4.0,
+        "vbar": 12.0
+      },
+      "nom_params": {
+        "alpha": 0.4,
+        "beta": 0.4,
+        "kappa": 1.5,
+        "h_st": 2.0,
+        "v0": 10.0,
+        "T": 0.4,
+        "s0": 2.0,
+        "b_comfort": 2.0,
+        "v_max": 10.0,
+        "a_max": 3.0,
+        "a_e": 2.5
+      },
+      "lead_params": {
+        "v_cruise": 10.0,
+        "t_cruise": 3.0,
+        "a_brake": 4.0,
+        "t_hold_dur": 3.0,
+        "a_accel": 2.0
+      }
+    },
+    "ego_strong": {
+      "a_e": 6.0,
+      "a_l": 4.0,
+      "init_gap": 13.0,
+      "p_safe": {
+        "tau": 1.0,
+        "a_e": 6.0,
+        "a_l": 4.0,
+        "vbar": 12.0
+      },
+      "nom_params": {
+        "alpha": 0.4,
+        "beta": 0.4,
+        "kappa": 1.5,
+        "h_st": 2.0,
+        "v0": 10.0,
+        "T": 0.4,
+        "s0": 2.0,
+        "b_comfort": 2.0,
+        "v_max": 10.0,
+        "a_max": 3.0,
+        "a_e": 6.0
+      },
+      "lead_params": {
+        "v_cruise": 10.0,
+        "t_cruise": 3.0,
+        "a_brake": 4.0,
+        "t_hold_dur": 3.0,
+        "a_accel": 2.0
+      }
+    }
+  }
+}

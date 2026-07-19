@@ -1,0 +1,10 @@
+scale,mismatch_type,assumed_alpha,assumed_beta,min_h_r,rear_end,v_final,v_offset,t_settle,settled,control_effort,intervention,peak_u,qp_infeasible
+,baseline,,,-1.612,True,1.0,0.0,3.65,True,19.11,0.0,3.0,0
+0.0,passive,0.0,0.0,2.578,False,1.58,0.58,25.0,False,7.87,22.96,1.78,0
+0.5,under,0.2,0.15,2.394,False,1.4,0.4,13.3,True,8.97,17.21,1.84,0
+0.75,under,0.3,0.225,2.326,False,1.33,0.33,11.35,True,9.42,15.28,1.84,0
+1.0,accurate,0.4,0.3,2.27,False,1.27,0.27,10.2,True,9.91,13.73,2.07,0
+1.25,over,0.5,0.375,2.221,False,1.22,0.22,9.45,True,10.35,12.43,2.14,0
+1.5,over,0.6,0.45,2.178,False,1.18,0.18,8.9,True,10.67,11.34,2.17,0
+1.75,over,0.7,0.525,2.139,False,1.14,0.14,8.5,True,10.88,10.4,2.19,0
+2.0,over,0.8,0.6,2.106,False,1.11,0.11,8.2,True,11.0,9.63,2.21,0

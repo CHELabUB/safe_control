@@ -720,18 +720,21 @@ class DriftingCarSimulator:
                 ha='center', va='center', zorder=100
             )
     
-    def step(self, U):
+    def step(self, U, skip_obstacle_step: bool = False):
         """
         Execute one simulation step.
-        
+
         Args:
             U: Control input [delta_dot, tau_dot]
-            
+            skip_obstacle_step: If True, skip the automatic env.step_dynamic_obstacles()
+                call. Use this when the caller drives obstacle stepping manually (e.g.,
+                for IDM-aware updates that need ego state before stepping).
+
         Returns:
             dict with 'collision', 'state', 'done' keys
         """
         self.car.step(U)
-        if hasattr(self.env, 'step_dynamic_obstacles'):
+        if not skip_obstacle_step and hasattr(self.env, 'step_dynamic_obstacles'):
             self.env.step_dynamic_obstacles(self.car.dt)
         collision = self.check_collision()
         
